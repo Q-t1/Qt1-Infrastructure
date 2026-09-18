@@ -65,7 +65,6 @@
         ];
       };
 
-      checks.x86_64-linux.infra-test =
-        self.nixosConfigurations.infra-test.config.system.build.toplevel;
+      checks.x86_64-linux.infra-test = self.nixosConfigurations.infra-test.config.system.build.toplevel;
     };
 }
