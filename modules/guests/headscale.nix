@@ -1,8 +1,14 @@
-# Host side of the headscale + headplane guest: the VM entry, the
-# credential for headplane's session cookie secret, and the gate that keeps
-# the VM stopped until that secret has been provisioned. The guest's own
-# configuration is ../../guests/headscale.nix.
-{ config, lib, ... }:
+# Host side of the headscale + headplane guest: the VM entry and its two
+# credentials. Unlike the cloudflared tunnel token, neither secret needs a
+# human to obtain it, so both are generated on the host the first time they're
+# missing (see headscale-provision-secrets below) rather than provisioned by
+# hand. The guest's own configuration is ../../guests/headscale.nix.
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 
 let
   host = config.qt1.infra.microvmHost;
@@ -58,10 +64,11 @@ in
       type = lib.types.str;
       default = "/var/lib/microvms/headscale/headplane-cookie-secret";
       description = ''
-        Host path holding headplane's session cookie secret: exactly 32
-        characters, provisioned by hand (see README). Read by qemu, which
-        runs as the `microvm` user, and passed into the guest as a systemd
-        credential so it never lands in the Nix store.
+        Host path holding headplane's session cookie secret: 32 random
+        characters, generated on the host the first time this path doesn't
+        exist (see headscale-provision-secrets). Read by qemu, which runs as
+        the `microvm` user, and passed into the guest as a systemd credential
+        so it never lands in the Nix store.
       '';
     };
 
@@ -80,10 +87,10 @@ in
       type = lib.types.str;
       default = "/var/lib/microvms/headscale/ssh_host_ed25519_key";
       description = ''
-        Host path holding the guest's SSH host private key, provisioned by
-        hand (see README): generate once with
-        `ssh-keygen -t ed25519 -N "" -f <path>`. The guest's root filesystem
-        is tmpfs, so without this a new host key (and a
+        Host path holding the guest's SSH host private key, generated on the
+        host the first time this path doesn't exist (see
+        headscale-provision-secrets). The guest's root filesystem is tmpfs,
+        so without a key pinned here a new one (and a
         REMOTE-HOST-IDENTIFICATION-CHANGED warning) would be generated on
         every VM restart. Read by qemu, which runs as the `microvm` user, and
         passed into the guest as a systemd credential so it never lands in
@@ -121,14 +128,47 @@ in
       };
     };
 
-    # Keep the VM stopped (skipped, not failed) until both secrets exist;
-    # start it with `systemctl start microvm@headscale` once provisioned.
-    # Two different condition *types* are used (rather than ConditionPathExists
-    # twice) because systemd ORs repeats of the same condition key but ANDs
-    # different ones.
-    systemd.services."microvm@headscale".unitConfig = {
-      ConditionPathExists = cfg.cookieSecretFile;
-      ConditionPathExistsGlob = cfg.sshHostKeyFile;
+    # Both secrets are host-generated, not human-provided (unlike
+    # cloudflared's tunnel token), so create whichever is missing before the
+    # VM starts instead of gating on a manual provisioning step. Idempotent:
+    # a file that already exists is left alone, so rotating one is still a
+    # matter of removing it by hand and restarting this service.
+    systemd.services.headscale-provision-secrets = {
+      description = "Generate the headscale guest's SSH host key and headplane cookie secret";
+      before = [ "microvm@headscale.service" ];
+      path = [
+        pkgs.openssh
+        pkgs.coreutils
+      ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+      };
+      script = ''
+        set -euo pipefail
+
+        install -d -m 0755 "$(dirname ${lib.escapeShellArg cfg.sshHostKeyFile})"
+
+        if [ ! -e ${lib.escapeShellArg cfg.sshHostKeyFile} ]; then
+          ssh-keygen -q -t ed25519 -N "" -f ${lib.escapeShellArg cfg.sshHostKeyFile}
+          rm -f ${lib.escapeShellArg cfg.sshHostKeyFile}.pub
+          chown microvm:kvm ${lib.escapeShellArg cfg.sshHostKeyFile}
+          chmod 0400 ${lib.escapeShellArg cfg.sshHostKeyFile}
+        fi
+
+        if [ ! -e ${lib.escapeShellArg cfg.cookieSecretFile} ]; then
+          (
+            umask 0377
+            head -c 32 /dev/urandom | base64 | head -c 32 > ${lib.escapeShellArg cfg.cookieSecretFile}
+          )
+          chown microvm:kvm ${lib.escapeShellArg cfg.cookieSecretFile}
+        fi
+      '';
+    };
+
+    systemd.services."microvm@headscale" = {
+      wants = [ "headscale-provision-secrets.service" ];
+      after = [ "headscale-provision-secrets.service" ];
     };
   };
 }

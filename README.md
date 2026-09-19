@@ -121,25 +121,21 @@ page at its root is normal, and `/health` is the way to check it's alive.
 
 `serverUrl`, `baseDomain` (for MagicDNS), `headplaneUrl` and `adminSshKey`
 have no defaults and must be set when enabling the guest — see the snippet
-above. Two secrets are provisioned by hand, like the cloudflared tunnel
-token, then on the host, after the first switch:
-
-```
-# headplane's session cookie: exactly 32 characters, no trailing newline
-sudo install -m 0400 -o microvm -g kvm /dev/stdin /var/lib/microvms/headscale/headplane-cookie-secret
-
-# the guest's SSH host key: generated once, since the root filesystem is
-# tmpfs and would otherwise regenerate (and change) it on every restart
-sudo ssh-keygen -t ed25519 -N "" -f /var/lib/microvms/headscale/ssh_host_ed25519_key
-sudo chown microvm:kvm /var/lib/microvms/headscale/ssh_host_ed25519_key
-sudo chmod 0400 /var/lib/microvms/headscale/ssh_host_ed25519_key
-
-sudo systemctl start microvm@headscale
-```
-
-Both secrets are only read when the VM boots: after rotating either, run
-`sudo systemctl restart microvm@headscale`. They arrive as systemd
+above. Unlike the cloudflared tunnel token, headplane's session cookie and
+the guest's SSH host key need no human input, so there's nothing to
+provision by hand: `headscale-provision-secrets` generates whichever one is
+missing under `/var/lib/microvms/headscale/` before the VM starts, the first
+time you switch with the guest enabled. Both arrive in the guest as systemd
 credentials (qemu runner only), so neither lands in the Nix store.
+
+To rotate either one, remove the file and restart the generator (the VM
+picks it up on its own next restart, via `Wants=`/`After=`):
+
+```
+sudo rm /var/lib/microvms/headscale/headplane-cookie-secret   # or ssh_host_ed25519_key
+sudo systemctl restart headscale-provision-secrets.service
+sudo systemctl restart microvm@headscale
+```
 
 `adminSshKey` authorizes root SSH into the guest, key-only, reachable only
 from the host (not from other guests on the bridge) — needed because the
