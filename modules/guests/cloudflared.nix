@@ -39,11 +39,14 @@ in
 
       authKeyFile = lib.mkOption {
         type = lib.types.str;
-        default = "/var/lib/microvms/cloudflared/tailscale-authkey";
+        default = config.qt1.infra.guests.headscale.tailscaleAuthKeyFile;
         description = ''
-          Host path holding a headscale pre-auth key, provisioned by hand
-          (see README). Read by qemu and passed into the guest as a systemd
-          credential, same as the tunnel token.
+          Host path holding a headscale pre-auth key. Defaults to the same
+          reusable key headscale-mint-tailscale-authkey generates (see
+          qt1.infra.guests.headscale.tailscaleAuthKeyFile) — no provisioning
+          needed unless you want this guest on a different key. Read by qemu
+          and passed into the guest as a systemd credential, same as the
+          tunnel token.
         '';
       };
     };
@@ -79,6 +82,15 @@ in
 
     # Keep the VM stopped (skipped, not failed) until the token exists; start
     # it with `systemctl start microvm@cloudflared` once provisioned.
-    systemd.services."microvm@cloudflared".unitConfig.ConditionPathExists = cfg.tokenFile;
+    systemd.services."microvm@cloudflared" = {
+      unitConfig.ConditionPathExists = cfg.tokenFile;
+    }
+    // lib.optionalAttrs cfg.tailscale.enable {
+      # Ordering (not just a Condition, unlike the token above) because the
+      # dependency is actually generatable: wait for the key to exist rather
+      # than fail outright if it's not there yet the very first time.
+      wants = [ "headscale-mint-tailscale-authkey.service" ];
+      after = [ "headscale-mint-tailscale-authkey.service" ];
+    };
   };
 }

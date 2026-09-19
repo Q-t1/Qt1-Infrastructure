@@ -163,8 +163,8 @@ headscale coordinates, via `qt1.infra.tailscaleClient`:
 ```nix
 qt1.infra.tailscaleClient = {
   enable = true;
-  loginServerUrl = "https://headscale.example.com";   # qt1.infra.guests.headscale.serverUrl
-  authKeyFile = "/var/lib/tailscale/authkey";
+  loginServerUrl = "https://headscale.example.com";        # qt1.infra.guests.headscale.serverUrl
+  authKeyFile = config.qt1.infra.guests.headscale.tailscaleAuthKeyFile;
   # ephemeral = true;   # set for machines with non-persistent state
 };
 ```
@@ -177,29 +177,31 @@ token, rather than a plain file path. cloudflared's join is `--ephemeral`
 since its root is tmpfs: without that, every restart would register as a new
 device and headscale would accumulate dead nodes.
 
-Unlike this repo's other secrets, `authKeyFile` needs a human step no matter
-what: minting a pre-auth key requires headscale already running and a user
-already created in it. One reusable key can cover every machine:
+**No manual step here, unlike the other secrets in this repo — including the
+pre-auth key itself.** Minting one normally requires headscale already
+running and a user already created in it, which is exactly what
+`headscale-mint-tailscale-authkey` does on the host, unattended: it waits for
+the headscale guest's SSH to come up, using a second host-generated keypair
+(distinct from `adminSshKey`, authorized the same way, see
+`automationSshKeyFile`) to create a `tailnetUser` (default `homelab`) if it
+doesn't exist and mint it a reusable, 10-year pre-auth key at
+`tailscaleAuthKeyFile`. Every consumer — the host, cloudflared — points at
+that same shared file. Idempotent on that file already existing, so this only
+ever runs for real once; to rotate the key, remove the file and restart:
 
 ```
-ssh root@10.100.0.3 headscale users create homelab        # once
-ssh root@10.100.0.3 headscale preauthkeys create --user homelab --reusable --expiration 8760h
-
-# on the host:
-sudo install -d -m 0700 /var/lib/tailscale
-sudo install -m 0400 /dev/stdin /var/lib/tailscale/authkey
-# paste the key, then Ctrl-D
-sudo systemctl restart tailscale-autoconnect
-
-# for the cloudflared guest:
-sudo install -m 0400 -o microvm -g kvm /dev/stdin /var/lib/microvms/cloudflared/tailscale-authkey
-# paste the same key, then Ctrl-D
-sudo systemctl restart microvm@cloudflared
+sudo rm /var/lib/microvms/headscale/tailscale-authkey
+sudo systemctl restart headscale-mint-tailscale-authkey
 ```
 
 The headscale guest itself is deliberately not a tailnet member — the
 coordination server being its own client would mean reaching itself back
 through its own tunnel, which is more circularity than it's worth.
+
+Enabling any of this for the first time changes the headscale and cloudflared
+guests' own configuration (new SSH credential wiring), so the switch that
+turns it on restarts both VMs to pick it up — a brief, expected interruption,
+not a sign anything is wrong.
 
 ## Adding a guest
 

@@ -1,5 +1,6 @@
 # Minimal NixOS host used only to evaluate/build the infra layer on its own,
 # with no consumer flake involved. Nothing here is deployed.
+{ config, ... }:
 {
   qt1.infra.microvmHost = {
     enable = true;
@@ -19,7 +20,7 @@
   qt1.infra.tailscaleClient = {
     enable = true;
     loginServerUrl = "https://headscale.example.com";
-    authKeyFile = "/var/lib/tailscale/authkey";
+    authKeyFile = config.qt1.infra.guests.headscale.tailscaleAuthKeyFile;
   };
 
   # Enough of a machine for `system.build.toplevel` to evaluate.

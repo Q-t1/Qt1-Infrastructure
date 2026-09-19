@@ -11,7 +11,9 @@
 # SSH is enabled for root, key-only, and reachable only from the host (not
 # from other guests on the bridge) — the `headscale` CLI (e.g. `apikeys
 # create`) talks to the running server over a local socket, so it has to run
-# on this guest itself.
+# on this guest itself. Two keys are authorized: adminSshKey for a human, and
+# a host-generated one for headscale-mint-tailscale-authkey to run
+# unattended (see ../modules/guests/headscale.nix).
 #
 # Called with its network coordinates and public hostnames by the host-side
 # module; guests are evaluated by microvm.nix in a nested nixosSystem that
@@ -106,7 +108,15 @@
       KbdInteractiveAuthentication = false;
     };
   };
-  systemd.services.sshd.serviceConfig.ImportCredential = "ssh-host-ed25519-key";
+  # authorizedKeysFiles is additive with the default NixOS sets from
+  # users.users.root.openssh.authorizedKeys.keys below, so root accepts
+  # either key: adminSshKey for a human, this credential for
+  # headscale-mint-tailscale-authkey running unattended on the host.
+  services.openssh.authorizedKeysFiles = [ "/run/credentials/sshd.service/automation-ssh-pubkey" ];
+  systemd.services.sshd.serviceConfig.ImportCredential = [
+    "ssh-host-ed25519-key"
+    "automation-ssh-pubkey"
+  ];
   users.users.root.openssh.authorizedKeys.keys = [ adminSshKey ];
 
   services.headscale = {
