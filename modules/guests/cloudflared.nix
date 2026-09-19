@@ -33,6 +33,20 @@ in
         Nix store.
       '';
     };
+
+    tailscale = {
+      enable = lib.mkEnableOption "joining this guest to the tailnet coordinated by qt1.infra.guests.headscale";
+
+      authKeyFile = lib.mkOption {
+        type = lib.types.str;
+        default = "/var/lib/microvms/cloudflared/tailscale-authkey";
+        description = ''
+          Host path holding a headscale pre-auth key, provisioned by hand
+          (see README). Read by qemu and passed into the guest as a systemd
+          credential, same as the tunnel token.
+        '';
+      };
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -40,6 +54,10 @@ in
       {
         assertion = host.enable;
         message = "qt1.infra.guests.cloudflared requires qt1.infra.microvmHost.enable.";
+      }
+      {
+        assertion = !cfg.tailscale.enable || config.qt1.infra.guests.headscale.enable;
+        message = "qt1.infra.guests.cloudflared.tailscale requires qt1.infra.guests.headscale.enable.";
       }
     ];
 
@@ -49,9 +67,14 @@ in
           inherit (cfg) address mac;
           inherit (host) prefixLength;
           gateway = host.hostAddress;
+          tailscaleEnable = cfg.tailscale.enable;
+          tailscaleLoginServerUrl = config.qt1.infra.guests.headscale.serverUrl;
         })
       ];
-      microvm.credentialFiles.tunnel-token = cfg.tokenFile;
+      microvm.credentialFiles = {
+        tunnel-token = cfg.tokenFile;
+      }
+      // lib.optionalAttrs cfg.tailscale.enable { tailscale-authkey = cfg.tailscale.authKeyFile; };
     };
 
     # Keep the VM stopped (skipped, not failed) until the token exists; start

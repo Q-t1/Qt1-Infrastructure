@@ -8,6 +8,10 @@
 # logs are mirrored to the serial console, so they show up on the host with
 # `journalctl -u microvm@cloudflared`.
 #
+# Optionally also joins the tailnet coordinated by this repo's own headscale
+# guest (../../modules/tailscale-client.nix), `--ephemeral` since the tmpfs
+# root means a fresh identity every boot otherwise piles up dead nodes.
+#
 # Called with its network coordinates by the host-side module; guests are
 # evaluated by microvm.nix in a nested nixosSystem that gets none of the
 # host's specialArgs, so they are passed in explicitly rather than read from
@@ -17,11 +21,15 @@
   mac,
   gateway,
   prefixLength,
+  tailscaleEnable ? false,
+  tailscaleLoginServerUrl ? null,
 }:
 
-{ pkgs, ... }:
+{ pkgs, lib, ... }:
 
 {
+  imports = [ ../modules/tailscale-client.nix ];
+
   microvm = {
     # credentialFiles is only implemented by the qemu runner.
     hypervisor = "qemu";
@@ -77,6 +85,18 @@
       StandardOutput = "journal+console";
       StandardError = "journal+console";
     };
+  };
+
+  qt1.infra.tailscaleClient = lib.optionalAttrs tailscaleEnable {
+    enable = true;
+    loginServerUrl = tailscaleLoginServerUrl;
+    # Imported the same way as the tunnel token; wired from the host in
+    # ../modules/guests/cloudflared.nix.
+    authKeyFile = "/run/credentials/tailscale-autoconnect.service/tailscale-authkey";
+    ephemeral = true;
+  };
+  systemd.services.tailscale-autoconnect = lib.mkIf tailscaleEnable {
+    serviceConfig.ImportCredential = "tailscale-authkey";
   };
 
   system.stateVersion = "26.05";

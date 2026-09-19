@@ -17,6 +17,7 @@ modules/guests/cloudflared.nix   host-side VM declaration     (qt1.infra.guests.
 guests/cloudflared.nix           the guest's own NixOS config
 modules/guests/headscale.nix     host-side VM declaration     (qt1.infra.guests.headscale)
 guests/headscale.nix             the guest's own NixOS config
+modules/tailscale-client.nix     join the tailnet             (qt1.infra.tailscaleClient)
 checks/test-host.nix             minimal host, used only to build this layer alone
 ```
 
@@ -153,6 +154,52 @@ database, headplane's data and both secrets above all live under
 separate persistent dataset backing it. Back that directory up before
 reinstalling, or be ready to reprovision the two secrets and have every
 Tailscale client re-register against a fresh instance.
+
+## Joining the tailnet (`qt1.infra.tailscaleClient`)
+
+Any machine — the bare host or a guest — can join the tailnet this repo's own
+headscale coordinates, via `qt1.infra.tailscaleClient`:
+
+```nix
+qt1.infra.tailscaleClient = {
+  enable = true;
+  loginServerUrl = "https://headscale.example.com";   # qt1.infra.guests.headscale.serverUrl
+  authKeyFile = "/var/lib/tailscale/authkey";
+  # ephemeral = true;   # set for machines with non-persistent state
+};
+```
+
+For the *host* this is the option above, applied directly. For a *guest*, use
+that guest's own opt-in instead (currently `qt1.infra.guests.cloudflared.tailscale.enable`)
+— it wires `loginServerUrl` from the headscale guest automatically and passes
+the key in as a systemd credential, the same way as the cloudflared tunnel
+token, rather than a plain file path. cloudflared's join is `--ephemeral`
+since its root is tmpfs: without that, every restart would register as a new
+device and headscale would accumulate dead nodes.
+
+Unlike this repo's other secrets, `authKeyFile` needs a human step no matter
+what: minting a pre-auth key requires headscale already running and a user
+already created in it. One reusable key can cover every machine:
+
+```
+ssh root@10.100.0.3 headscale users create homelab        # once
+ssh root@10.100.0.3 headscale preauthkeys create --user homelab --reusable --expiration 8760h
+
+# on the host:
+sudo install -d -m 0700 /var/lib/tailscale
+sudo install -m 0400 /dev/stdin /var/lib/tailscale/authkey
+# paste the key, then Ctrl-D
+sudo systemctl restart tailscale-autoconnect
+
+# for the cloudflared guest:
+sudo install -m 0400 -o microvm -g kvm /dev/stdin /var/lib/microvms/cloudflared/tailscale-authkey
+# paste the same key, then Ctrl-D
+sudo systemctl restart microvm@cloudflared
+```
+
+The headscale guest itself is deliberately not a tailnet member — the
+coordination server being its own client would mean reaching itself back
+through its own tunnel, which is more circularity than it's worth.
 
 ## Adding a guest
 
