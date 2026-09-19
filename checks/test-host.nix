@@ -11,6 +11,7 @@
     serverUrl = "https://headscale.example.com";
     baseDomain = "tailnet.example.com";
     headplaneUrl = "https://headplane.example.com";
+    adminSshKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDummyKeyForEvalOnly test@example.com";
   };
 
   # Enough of a machine for `system.build.toplevel` to evaluate.

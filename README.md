@@ -54,6 +54,7 @@ qt1.infra = {
     serverUrl = "https://headscale.example.com";
     baseDomain = "tailnet.example.com";
     headplaneUrl = "https://headplane.example.com";
+    adminSshKey = "ssh-ed25519 AAAA... you@yourhost";
   };
 };
 ```
@@ -113,24 +114,49 @@ in the Cloudflare Zero Trust dashboard, routed to:
 - `http://10.100.0.3:8080` for `serverUrl` (headscale)
 - `http://10.100.0.3:3000` for `headplaneUrl` (headplane)
 
-`serverUrl`, `baseDomain` (for MagicDNS) and `headplaneUrl` have no defaults
-and must be set when enabling the guest — see the snippet above. headplane
-also needs a 32-character session cookie secret, provisioned by hand like the
-cloudflared tunnel token, then on the host, after the first switch:
+headplane has no web UI of its own at `/` — it's mounted under `/admin`
+(fixed by headplane itself, not configurable), so browse to
+`https://headplane.qt1.fr/admin`. headscale has no web UI at all; a blank
+page at its root is normal, and `/health` is the way to check it's alive.
+
+`serverUrl`, `baseDomain` (for MagicDNS), `headplaneUrl` and `adminSshKey`
+have no defaults and must be set when enabling the guest — see the snippet
+above. Two secrets are provisioned by hand, like the cloudflared tunnel
+token, then on the host, after the first switch:
 
 ```
+# headplane's session cookie: exactly 32 characters, no trailing newline
 sudo install -m 0400 -o microvm -g kvm /dev/stdin /var/lib/microvms/headscale/headplane-cookie-secret
-# paste 32 characters, no trailing newline, then Ctrl-D
+
+# the guest's SSH host key: generated once, since the root filesystem is
+# tmpfs and would otherwise regenerate (and change) it on every restart
+sudo ssh-keygen -t ed25519 -N "" -f /var/lib/microvms/headscale/ssh_host_ed25519_key
+sudo chown microvm:kvm /var/lib/microvms/headscale/ssh_host_ed25519_key
+sudo chmod 0400 /var/lib/microvms/headscale/ssh_host_ed25519_key
+
 sudo systemctl start microvm@headscale
 ```
 
-The secret is only read when the VM boots: after rotating it, run
-`sudo systemctl restart microvm@headscale`. It arrives as a systemd
-credential (qemu runner only), so it never lands in the Nix store.
+Both secrets are only read when the VM boots: after rotating either, run
+`sudo systemctl restart microvm@headscale`. They arrive as systemd
+credentials (qemu runner only), so neither lands in the Nix store.
+
+`adminSshKey` authorizes root SSH into the guest, key-only, reachable only
+from the host (not from other guests on the bridge) — needed because the
+`headscale` CLI (`headscale users create`, `headscale apikeys create`, ...)
+talks to the running server over a local socket, so it has to run on the
+guest itself: `ssh root@10.100.0.3 headscale apikeys create`.
 
 headscale's default DERP relays are Tailscale's own (`derp.urls`), so no UDP
 port needs exposing for that either — only the two TCP ports above, reached
 from cloudflared over the guest bridge.
+
+**Nothing here survives a from-scratch reinstall of the host.** The node/key
+database, headplane's data and both secrets above all live under
+`/var/lib/microvms/headscale/` on the host's own root filesystem — there's no
+separate persistent dataset backing it. Back that directory up before
+reinstalling, or be ready to reprovision the two secrets and have every
+Tailscale client re-register against a fresh instance.
 
 ## Adding a guest
 

@@ -8,6 +8,11 @@
 # headplane's own data live on persistent volumes rather than the default
 # tmpfs root, so they survive guest restarts.
 #
+# SSH is enabled for root, key-only, and reachable only from the host (not
+# from other guests on the bridge) — the `headscale` CLI (e.g. `apikeys
+# create`) talks to the running server over a local socket, so it has to run
+# on this guest itself.
+#
 # Called with its network coordinates and public hostnames by the host-side
 # module; guests are evaluated by microvm.nix in a nested nixosSystem that
 # gets none of the host's specialArgs, so they are passed in explicitly
@@ -20,9 +25,10 @@
   serverUrl,
   baseDomain,
   headplaneUrl,
+  adminSshKey,
 }:
 
-{ ... }:
+{ lib, ... }:
 
 {
   microvm = {
@@ -64,16 +70,44 @@
       "1.1.1.1"
       "8.8.8.8"
     ];
-    firewall.allowedTCPPorts = [
-      8080
-      3000
-    ];
+    firewall = {
+      allowedTCPPorts = [
+        8080
+        3000
+      ];
+      # SSH (admin access, for one-off `headscale` CLI commands) is not in
+      # allowedTCPPorts: it must only be reachable from the host, not from
+      # other guests on the bridge. extraCommands runs before the firewall's
+      # default-drop rule, so this is the only way in on port 22.
+      extraCommands = ''
+        iptables -A nixos-fw -p tcp --dport 22 -s ${gateway} -j nixos-fw-accept
+      '';
+    };
   };
   systemd.network.networks."10-uplink" = {
     matchConfig.MACAddress = mac;
     address = [ "${address}/${toString prefixLength}" ];
     gateway = [ gateway ];
   };
+
+  services.openssh = {
+    enable = true;
+    # The root filesystem is tmpfs, so a generated host key would be
+    # regenerated (and change) on every VM restart. Use the one pinned by the
+    # host instead (see ../modules/guests/headscale.nix), imported the same
+    # way as headplane's cookie secret.
+    hostKeys = lib.mkForce [ ];
+    extraConfig = ''
+      HostKey /run/credentials/sshd.service/ssh-host-ed25519-key
+    '';
+    settings = {
+      PermitRootLogin = "prohibit-password";
+      PasswordAuthentication = false;
+      KbdInteractiveAuthentication = false;
+    };
+  };
+  systemd.services.sshd.serviceConfig.ImportCredential = "ssh-host-ed25519-key";
+  users.users.root.openssh.authorizedKeys.keys = [ adminSshKey ];
 
   services.headscale = {
     enable = true;
