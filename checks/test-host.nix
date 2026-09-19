@@ -6,6 +6,12 @@
     uplinkInterface = "eth0";
   };
   qt1.infra.guests.cloudflared.enable = true;
+  qt1.infra.guests.headscale = {
+    enable = true;
+    serverUrl = "https://headscale.example.com";
+    baseDomain = "tailnet.example.com";
+    headplaneUrl = "https://headplane.example.com";
+  };
 
   # Enough of a machine for `system.build.toplevel` to evaluate.
   boot.loader.grub.devices = [ "/dev/vda" ];

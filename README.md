@@ -15,6 +15,8 @@ flake.nix                        nixosModules.default, standalone test host, che
 modules/microvm-host.nix         guest bridge + NAT           (qt1.infra.microvmHost)
 modules/guests/cloudflared.nix   host-side VM declaration     (qt1.infra.guests.cloudflared)
 guests/cloudflared.nix           the guest's own NixOS config
+modules/guests/headscale.nix     host-side VM declaration     (qt1.infra.guests.headscale)
+guests/headscale.nix             the guest's own NixOS config
 checks/test-host.nix             minimal host, used only to build this layer alone
 ```
 
@@ -47,6 +49,12 @@ qt1.infra = {
     uplinkInterface = "enp2s0";   # the only OS fact this layer needs
   };
   guests.cloudflared.enable = true;
+  guests.headscale = {
+    enable = true;
+    serverUrl = "https://headscale.example.com";
+    baseDomain = "tailnet.example.com";
+    headplaneUrl = "https://headplane.example.com";
+  };
 };
 ```
 
@@ -86,6 +94,43 @@ are on the host, in `journalctl -u microvm@cloudflared`.
 
 LAN origins see the tunnel's traffic coming from the host's own address; a
 service on the host itself also needs its port opened in the host firewall.
+
+## headscale + headplane guest
+
+`headscale` (10.100.0.3) runs [headscale](https://github.com/juanfont/headscale)
+(a self-hosted Tailscale coordination server) and
+[headplane](https://github.com/tale/headplane) (its web UI) together on one
+guest. Unlike cloudflared it is stateful: its node/key database and
+headplane's own data live on two persistent volumes
+(`/var/lib/microvms/headscale/{headscale,headplane}-data.img`), auto-created
+on first boot, so they survive guest restarts.
+
+Both services are reached only through the cloudflared tunnel — nothing here
+opens a port on the host or the WAN. headscale and headplane are on the same
+bridge as cloudflared, so it reaches them directly; add two public hostnames
+in the Cloudflare Zero Trust dashboard, routed to:
+
+- `http://10.100.0.3:8080` for `serverUrl` (headscale)
+- `http://10.100.0.3:3000` for `headplaneUrl` (headplane)
+
+`serverUrl`, `baseDomain` (for MagicDNS) and `headplaneUrl` have no defaults
+and must be set when enabling the guest — see the snippet above. headplane
+also needs a 32-character session cookie secret, provisioned by hand like the
+cloudflared tunnel token, then on the host, after the first switch:
+
+```
+sudo install -m 0400 -o microvm -g kvm /dev/stdin /var/lib/microvms/headscale/headplane-cookie-secret
+# paste 32 characters, no trailing newline, then Ctrl-D
+sudo systemctl start microvm@headscale
+```
+
+The secret is only read when the VM boots: after rotating it, run
+`sudo systemctl restart microvm@headscale`. It arrives as a systemd
+credential (qemu runner only), so it never lands in the Nix store.
+
+headscale's default DERP relays are Tailscale's own (`derp.urls`), so no UDP
+port needs exposing for that either — only the two TCP ports above, reached
+from cloudflared over the guest bridge.
 
 ## Adding a guest
 
