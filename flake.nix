@@ -48,9 +48,8 @@
           imports = [
             microvm.nixosModules.host
             ./modules/microvm-host.nix
-            ./modules/tailscale-client.nix
-            ./modules/guests/cloudflared.nix
-            ./modules/guests/headscale.nix
+            ./modules/guests/newt.nix
+            ./modules/guests/pangolin.nix
           ];
         };
       };

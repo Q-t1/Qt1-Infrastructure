@@ -13,11 +13,10 @@ inputs and builds on its own, and devSystem consumes it as a flake input.
 ```
 flake.nix                        nixosModules.default, standalone test host, checks
 modules/microvm-host.nix         guest bridge + NAT           (qt1.infra.microvmHost)
-modules/guests/cloudflared.nix   host-side VM declaration     (qt1.infra.guests.cloudflared)
-guests/cloudflared.nix           the guest's own NixOS config
-modules/guests/headscale.nix     host-side VM declaration     (qt1.infra.guests.headscale)
-guests/headscale.nix             the guest's own NixOS config
-modules/tailscale-client.nix     join the tailnet             (qt1.infra.tailscaleClient)
+modules/guests/newt.nix          host-side VM declaration     (qt1.infra.guests.newt)
+guests/newt.nix                  the guest's own NixOS config
+modules/guests/pangolin.nix      host-side VM declaration     (qt1.infra.guests.pangolin)
+guests/pangolin.nix              the guest's own NixOS config
 checks/test-host.nix             minimal host, used only to build this layer alone
 ```
 
@@ -49,13 +48,12 @@ qt1.infra = {
     enable = true;
     uplinkInterface = "enp2s0";   # the only OS fact this layer needs
   };
-  guests.cloudflared.enable = true;
-  guests.headscale = {
+  guests.newt.enable = true;
+  guests.pangolin = {
     enable = true;
-    serverUrl = "https://headscale.example.com";
-    baseDomain = "tailnet.example.com";
-    headplaneUrl = "https://headplane.example.com";
-    adminSshKey = "ssh-ed25519 AAAA... you@yourhost";
+    dashboardDomain = "example.com";   # can equal baseDomain, see its option doc
+    baseDomain = "example.com";
+    letsEncryptEmail = "you@example.com";
   };
 };
 ```
@@ -74,152 +72,98 @@ nix eval .#nixosConfigurations.infra-test.config.system.build.toplevel.drvPath
 
 The second form only evaluates, so it works from macOS.
 
-## cloudflared guest
+## pangolin guest
 
-`cloudflared` (10.100.0.2) runs a dashboard-managed Cloudflare Tunnel — the
-entrypoint into the local infrastructure. Public hostnames and private routes
-are configured in Cloudflare Zero Trust, so the VM only needs a tunnel token,
-and it stays stopped until that token is on the host. Create the tunnel in the
-dashboard (connector: cloudflared), copy its token, then on the host, after the
-first switch:
+`pangolin` (10.100.0.4) is the WAN-facing entrypoint into the local
+infrastructure — a self-hosted [Pangolin](https://github.com/fosrl/pangolin)
+stack, replacing the old Cloudflare Tunnel. Three docker containers, run the
+same way upstream's own compose file runs them (there's no native nixpkgs
+package for any of them):
 
-```
-sudo install -m 0400 -o microvm -g kvm /dev/stdin /var/lib/microvms/cloudflared/tunnel-token
-# paste the token, then Ctrl-D
-sudo systemctl start microvm@cloudflared
-```
+- **pangolin**: the control-plane app — dashboard, API, and the database of
+  sites/resources/targets.
+- **gerbil**: the WireGuard gateway sites tunnel through. Owns the ports that
+  are actually reachable from the WAN.
+- **traefik**: reverse-proxies resources to their targets and terminates TLS
+  via Let's Encrypt.
 
-The token is only read when the VM boots: after rotating it, run
-`sudo systemctl restart microvm@cloudflared`. It is passed in as a systemd
-credential (qemu runner only), so it never lands in the Nix store. Tunnel logs
-are on the host, in `journalctl -u microvm@cloudflared`.
+Unlike Cloudflare Tunnel, **this guest needs real inbound ports.** The host
+forwards them in from the WAN (`networking.nat.forwardPorts`, wired by
+`modules/guests/pangolin.nix`):
 
-LAN origins see the tunnel's traffic coming from the host's own address; a
-service on the host itself also needs its port opened in the host firewall.
+| Port        | Proto | Purpose                          |
+| ----------- | ----- | --------------------------------- |
+| 80          | tcp   | HTTP → HTTPS redirect, ACME       |
+| 443         | tcp   | HTTPS (dashboard + resources)     |
+| 51820       | udp   | WireGuard (sites ↔ gerbil)        |
+| 21820       | udp   | WireGuard (clients ↔ gerbil)      |
 
-## headscale + headplane guest
+Your router/firewall must forward these from your WAN address to this host —
+that's outside this repo's scope. You also need DNS: an A/AAAA record for
+`dashboardDomain` and a wildcard record for `*.baseDomain`, both pointed at
+your WAN address.
 
-`headscale` (10.100.0.3) runs [headscale](https://github.com/juanfont/headscale)
-(a self-hosted Tailscale coordination server) and
-[headplane](https://github.com/tale/headplane) (its web UI) together on one
-guest. Unlike cloudflared it is stateful: its node/key database and
-headplane's own data live on two persistent volumes
-(`/var/lib/microvms/headscale/{headscale,headplane}-data.img`), auto-created
-on first boot, so they survive guest restarts.
+Everything else is unattended: `server.secret` is generated on the guest's own
+persistent volume the first time it's missing (nothing to provision by hand,
+unlike newt's config file below), and Pangolin/gerbil/traefik's own config
+files are rendered from `dashboardDomain`, `baseDomain` and `letsEncryptEmail`
+at build time.
 
-Both services are reached only through the cloudflared tunnel — nothing here
-opens a port on the host or the WAN. headscale and headplane are on the same
-bridge as cloudflared, so it reaches them directly; add two public hostnames
-in the Cloudflare Zero Trust dashboard, routed to:
+After the first switch, watch it come up and grab the one-time setup token
+from `journalctl -u microvm@pangolin -f` on the host (see the note on
+`docker-pangolin`'s console logging above), then open
+`https://<dashboardDomain>/auth/initial-setup` — or, before DNS/port-forwarding
+are even live, reach the dashboard directly over the bridge at
+`http://<pangolin address>:3002` — to create an admin account and your first
+organization. From there, add **Resources** (public hostnames under
+`baseDomain`) pointed at their **Targets** (an address on the guest bridge,
+e.g. another guest's IP:port) — this is the Pangolin-dashboard equivalent of
+what used to be configured in the Cloudflare Zero Trust dashboard.
 
-- `http://10.100.0.3:8080` for `serverUrl` (headscale)
-- `http://10.100.0.3:3000` for `headplaneUrl` (headplane)
+Docker's own image/layer storage and Pangolin's config/db/certs each live on a
+persistent volume (`/var/lib/docker` and `/var/lib/pangolin` respectively), so
+neither is re-pulled nor regenerated across guest restarts.
 
-headplane has no web UI of its own at `/` — it's mounted under `/admin`
-(fixed by headplane itself, not configurable), so browse to
-`https://headplane.qt1.fr/admin`. headscale has no web UI at all; a blank
-page at its root is normal, and `/health` is the way to check it's alive.
+## newt guest
 
-`serverUrl`, `baseDomain` (for MagicDNS), `headplaneUrl` and `adminSshKey`
-have no defaults and must be set when enabling the guest — see the snippet
-above. Unlike the cloudflared tunnel token, headplane's session cookie and
-the guest's SSH host key need no human input, so there's nothing to
-provision by hand: `headscale-provision-secrets` generates whichever one is
-missing under `/var/lib/microvms/headscale/` before the VM starts, the first
-time you switch with the guest enabled. Both arrive in the guest as systemd
-credentials (qemu runner only), so neither lands in the Nix store.
+`newt` (10.100.0.2) is Pangolin's lightweight site connector — a fully
+userspace WireGuard client (no kernel module or capabilities needed) that
+dials out to the pangolin guest and proxies whatever targets are registered
+against it. It plays the same "dashboard-managed, only needs one credential"
+role cloudflared used to.
 
-To rotate either one, remove the file and restart the generator (the VM
-picks it up on its own next restart, via `Wants=`/`After=`):
-
-```
-sudo rm /var/lib/microvms/headscale/headplane-cookie-secret   # or ssh_host_ed25519_key
-sudo systemctl restart headscale-provision-secrets.service
-sudo systemctl restart microvm@headscale
-```
-
-`adminSshKey` authorizes root SSH into the guest, key-only, reachable only
-from the host (not from other guests on the bridge) — needed because the
-`headscale` CLI (`headscale users create`, `headscale apikeys create`, ...)
-talks to the running server over a local socket, so it has to run on the
-guest itself: `ssh root@10.100.0.3 headscale apikeys create`.
-
-headscale's default DERP relays are Tailscale's own (`derp.urls`), so no UDP
-port needs exposing for that either — only the two TCP ports above, reached
-from cloudflared over the guest bridge.
-
-**Nothing here survives a from-scratch reinstall of the host.** The node/key
-database, headplane's data and both secrets above all live under
-`/var/lib/microvms/headscale/` on the host's own root filesystem — there's no
-separate persistent dataset backing it. Back that directory up before
-reinstalling, or be ready to reprovision the two secrets and have every
-Tailscale client re-register against a fresh instance.
-
-## Joining the tailnet (`qt1.infra.tailscaleClient`)
-
-Any machine — the bare host or a guest — can join the tailnet this repo's own
-headscale coordinates, via `qt1.infra.tailscaleClient`:
-
-```nix
-qt1.infra.tailscaleClient = {
-  enable = true;
-  loginServerUrl = config.qt1.infra.guests.headscale.internalUrl;
-  authKeyFile = config.qt1.infra.guests.headscale.tailscaleAuthKeyFile;
-  # ephemeral = true;   # set for machines with non-persistent state
-};
-```
-
-**Use `internalUrl`, not `serverUrl`, for anything that's already on the guest
-bridge** — the host and any guest. Cloudflare Tunnel does not pass through
-the `Upgrade` header Tailscale's client-registration protocol (ts2021/noise)
-needs: every attempt through the public `serverUrl` fails server-side with
-*"no upgrade header in TS2021 request"*, a Cloudflare/Tailscale protocol
-incompatibility with no fix on this end. `internalUrl` (headscale's plain
-`http://` address on the bridge) sidesteps Cloudflare entirely, which is also
-just the more direct route for traffic that never needed to leave the LAN.
-This means an actual external Tailscale client — a phone, a laptop away from
-home — trying to join via the public hostname will likely hit the same wall;
-that's a separate, bigger problem than internal auto-join and isn't solved
-here.
-
-For the *host* this is the option above, applied directly. For a *guest*, use
-that guest's own opt-in instead (currently `qt1.infra.guests.cloudflared.tailscale.enable`)
-— it wires `loginServerUrl` from the headscale guest automatically and passes
-the key in as a systemd credential, the same way as the cloudflared tunnel
-token, rather than a plain file path. cloudflared's join is `--ephemeral`
-since its root is tmpfs: without that, every restart would register as a new
-device and headscale would accumulate dead nodes.
-
-**No manual step here, unlike the other secrets in this repo — including the
-pre-auth key itself.** Minting one normally requires headscale already
-running and a user already created in it, which is exactly what
-`headscale-mint-tailscale-authkey` does on the host, unattended: it waits for
-the headscale guest's SSH to come up, using a second host-generated keypair
-(distinct from `adminSshKey`, authorized the same way, see
-`automationSshKeyFile`) to create a `tailnetUser` (default `homelab`) if it
-doesn't exist and mint it a reusable, 10-year pre-auth key at
-`tailscaleAuthKeyFile`. Every consumer — the host, cloudflared — points at
-that same shared file. Idempotent on that file already existing, so this only
-ever runs for real once; to rotate the key, remove the file and restart:
+To provision it: in the Pangolin dashboard, add a **Site** of type **Newt**,
+which gives you a Newt ID and secret. Then, on the host, after the first
+switch:
 
 ```
-sudo rm /var/lib/microvms/headscale/tailscale-authkey
-sudo systemctl restart headscale-mint-tailscale-authkey
+sudo install -d -m 0755 -o microvm -g kvm /var/lib/microvms/newt
+sudo install -m 0400 -o microvm -g kvm /dev/stdin /var/lib/microvms/newt/newt-config.json <<'EOF'
+{
+  "endpoint": "http://10.100.0.4:3000",
+  "id": "<newt id from the dashboard>",
+  "secret": "<newt secret from the dashboard>"
+}
+EOF
+sudo systemctl start microvm@newt
 ```
 
-The headscale guest itself is deliberately not a tailnet member — the
-coordination server being its own client would mean reaching itself back
-through its own tunnel, which is more circularity than it's worth.
+`endpoint` above is `qt1.infra.guests.pangolin.internalUrl`: this newt site is
+this repo's own, colocated on the same guest bridge as the pangolin guest, so
+it talks to Pangolin's API directly over the bridge instead of round-tripping
+through the WAN entrypoint, DNS and TLS to reach itself. It's otherwise no
+different from — and authenticates the same way as — a newt site running
+anywhere else.
 
-Enabling any of this for the first time changes the headscale and cloudflared
-guests' own configuration (new SSH credential wiring), so the switch that
-turns it on restarts both VMs to pick it up — a brief, expected interruption,
-not a sign anything is wrong.
+The config file is only read when the VM boots: after changing it, run
+`sudo systemctl restart microvm@newt`. It is passed in as a systemd credential
+(qemu runner only), so it never lands in the Nix store. newt's logs are on the
+host, in `journalctl -u microvm@newt`.
 
 ## Adding a guest
 
 1. `guests/<name>.nix` — the guest's NixOS config, as a function of its network
-   coordinates (see `guests/cloudflared.nix`). microvm.nix evaluates guests in
+   coordinates (see `guests/newt.nix`). microvm.nix evaluates guests in
    a nested `nixosSystem` that receives none of the host's specialArgs, so pass
    anything it needs explicitly.
 2. `modules/guests/<name>.nix` — `qt1.infra.guests.<name>` options and the

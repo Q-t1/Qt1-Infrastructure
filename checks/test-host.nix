@@ -1,27 +1,17 @@
 # Minimal NixOS host used only to evaluate/build the infra layer on its own,
 # with no consumer flake involved. Nothing here is deployed.
-{ config, ... }:
+{ ... }:
 {
   qt1.infra.microvmHost = {
     enable = true;
     uplinkInterface = "eth0";
   };
-  qt1.infra.guests.cloudflared = {
+  qt1.infra.guests.newt.enable = true;
+  qt1.infra.guests.pangolin = {
     enable = true;
-    tailscale.enable = true;
-  };
-  qt1.infra.guests.headscale = {
-    enable = true;
-    serverUrl = "https://headscale.example.com";
-    baseDomain = "tailnet.example.com";
-    headplaneUrl = "https://headplane.example.com";
-    adminSshKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDummyKeyForEvalOnly test@example.com";
-  };
-  qt1.infra.tailscaleClient = {
-    enable = true;
-    # Bridge-local: see qt1.infra.guests.headscale.serverUrl's description.
-    loginServerUrl = config.qt1.infra.guests.headscale.internalUrl;
-    authKeyFile = config.qt1.infra.guests.headscale.tailscaleAuthKeyFile;
+    dashboardDomain = "pangolin.example.com";
+    baseDomain = "tunnel.example.com";
+    letsEncryptEmail = "you@example.com";
   };
 
   # Enough of a machine for `system.build.toplevel` to evaluate.
