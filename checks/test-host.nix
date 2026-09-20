@@ -19,7 +19,8 @@
   };
   qt1.infra.tailscaleClient = {
     enable = true;
-    loginServerUrl = "https://headscale.example.com";
+    # Bridge-local: see qt1.infra.guests.headscale.serverUrl's description.
+    loginServerUrl = config.qt1.infra.guests.headscale.internalUrl;
     authKeyFile = config.qt1.infra.guests.headscale.tailscaleAuthKeyFile;
   };
 

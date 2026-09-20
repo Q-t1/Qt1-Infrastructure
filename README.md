@@ -163,11 +163,24 @@ headscale coordinates, via `qt1.infra.tailscaleClient`:
 ```nix
 qt1.infra.tailscaleClient = {
   enable = true;
-  loginServerUrl = "https://headscale.example.com";        # qt1.infra.guests.headscale.serverUrl
+  loginServerUrl = config.qt1.infra.guests.headscale.internalUrl;
   authKeyFile = config.qt1.infra.guests.headscale.tailscaleAuthKeyFile;
   # ephemeral = true;   # set for machines with non-persistent state
 };
 ```
+
+**Use `internalUrl`, not `serverUrl`, for anything that's already on the guest
+bridge** — the host and any guest. Cloudflare Tunnel does not pass through
+the `Upgrade` header Tailscale's client-registration protocol (ts2021/noise)
+needs: every attempt through the public `serverUrl` fails server-side with
+*"no upgrade header in TS2021 request"*, a Cloudflare/Tailscale protocol
+incompatibility with no fix on this end. `internalUrl` (headscale's plain
+`http://` address on the bridge) sidesteps Cloudflare entirely, which is also
+just the more direct route for traffic that never needed to leave the LAN.
+This means an actual external Tailscale client — a phone, a laptop away from
+home — trying to join via the public hostname will likely hit the same wall;
+that's a separate, bigger problem than internal auto-join and isn't solved
+here.
 
 For the *host* this is the option above, applied directly. For a *guest*, use
 that guest's own opt-in instead (currently `qt1.infra.guests.cloudflared.tailscale.enable`)

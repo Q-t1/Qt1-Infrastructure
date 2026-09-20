@@ -38,6 +38,28 @@ in
         this hostname to http://${cfg.address}:8080 in the cloudflared
         tunnel's dashboard-managed config; nothing here opens a port on the
         host or the WAN.
+
+        Cloudflare Tunnel does not pass through the `Upgrade` header
+        Tailscale's client-registration protocol (ts2021/noise) needs — every
+        registration attempt via this URL fails server-side with "no upgrade
+        header in TS2021 request". This is a Cloudflare/Tailscale protocol
+        incompatibility, not something fixable in this config; any consumer
+        that can reach headscale without leaving the guest bridge should use
+        internalUrl instead.
+      '';
+    };
+
+    internalUrl = lib.mkOption {
+      type = lib.types.str;
+      default = "http://${cfg.address}:8080";
+      readOnly = true;
+      description = ''
+        headscale's address on the guest bridge, for tailscaleClient
+        consumers that are themselves on the bridge (the host, or another
+        guest) — bypasses Cloudflare Tunnel entirely, and with it the
+        ts2021/Upgrade-header incompatibility described on serverUrl. Not
+        reachable off the bridge, so no use to an actual external Tailscale
+        client.
       '';
     };
 

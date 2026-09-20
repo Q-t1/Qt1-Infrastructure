@@ -71,7 +71,10 @@ in
           inherit (host) prefixLength;
           gateway = host.hostAddress;
           tailscaleEnable = cfg.tailscale.enable;
-          tailscaleLoginServerUrl = config.qt1.infra.guests.headscale.serverUrl;
+          # Bridge-local like headscale itself, so this bypasses Cloudflare
+          # Tunnel (and its incompatibility with Tailscale's registration
+          # protocol) entirely — see serverUrl's description.
+          tailscaleLoginServerUrl = config.qt1.infra.guests.headscale.internalUrl;
         })
       ];
       microvm.credentialFiles = {
