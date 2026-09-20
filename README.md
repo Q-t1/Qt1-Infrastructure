@@ -13,10 +13,9 @@ inputs and builds on its own, and devSystem consumes it as a flake input.
 ```
 flake.nix                        nixosModules.default, standalone test host, checks
 modules/microvm-host.nix         guest bridge + NAT           (qt1.infra.microvmHost)
-modules/guests/newt.nix          host-side VM declaration     (qt1.infra.guests.newt)
-guests/newt.nix                  the guest's own NixOS config
-modules/guests/pangolin.nix      host-side VM declaration     (qt1.infra.guests.pangolin)
-guests/pangolin.nix              the guest's own NixOS config
+modules/tailscale-client.nix     join the tailnet             (qt1.infra.tailscaleClient)
+modules/guests/headscale.nix     host-side VM declaration     (qt1.infra.guests.headscale)
+guests/headscale.nix             the guest's own NixOS config
 checks/test-host.nix             minimal host, used only to build this layer alone
 ```
 
@@ -48,12 +47,12 @@ qt1.infra = {
     enable = true;
     uplinkInterface = "enp2s0";   # the only OS fact this layer needs
   };
-  guests.newt.enable = true;
-  guests.pangolin = {
+  guests.headscale = {
     enable = true;
-    dashboardDomain = "example.com";   # can equal baseDomain, see its option doc
-    baseDomain = "example.com";
+    serverUrl = "https://access.example.com";
+    baseDomain = "tailnet.example.com";   # must differ from serverUrl's domain
     letsEncryptEmail = "you@example.com";
+    adminSshKey = "ssh-ed25519 AAAA... you@yourhost";
   };
 };
 ```
@@ -72,98 +71,123 @@ nix eval .#nixosConfigurations.infra-test.config.system.build.toplevel.drvPath
 
 The second form only evaluates, so it works from macOS.
 
-## pangolin guest
+## headscale guest
 
-`pangolin` (10.100.0.4) is the WAN-facing entrypoint into the local
-infrastructure — a self-hosted [Pangolin](https://github.com/fosrl/pangolin)
-stack, replacing the old Cloudflare Tunnel. Three docker containers, run the
-same way upstream's own compose file runs them (there's no native nixpkgs
-package for any of them):
+`headscale` (10.100.0.2) is the WAN-facing entrypoint into the local
+infrastructure — a self-hosted [headscale](https://github.com/juanfont/headscale)
+coordination server for Tailscale, run entirely from nixpkgs' own
+`services.headscale` module (no Docker, no separate reverse proxy). Unlike
+the old Cloudflare Tunnel or the Pangolin stack this repo ran before it,
+headscale terminates its own TLS via built-in Let's Encrypt
+(`tls_letsencrypt_hostname`), so **this guest needs real inbound ports**. The
+host forwards them in from the WAN (`networking.nat.forwardPorts`, wired by
+`modules/guests/headscale.nix`):
 
-- **pangolin**: the control-plane app — dashboard, API, and the database of
-  sites/resources/targets.
-- **gerbil**: the WireGuard gateway sites tunnel through. Owns the ports that
-  are actually reachable from the WAN.
-- **traefik**: reverse-proxies resources to their targets and terminates TLS
-  via Let's Encrypt.
-
-Unlike Cloudflare Tunnel, **this guest needs real inbound ports.** The host
-forwards them in from the WAN (`networking.nat.forwardPorts`, wired by
-`modules/guests/pangolin.nix`):
-
-| Port        | Proto | Purpose                          |
-| ----------- | ----- | --------------------------------- |
-| 80          | tcp   | HTTP → HTTPS redirect, ACME       |
-| 443         | tcp   | HTTPS (dashboard + resources)     |
-| 51820       | udp   | WireGuard (sites ↔ gerbil)        |
-| 21820       | udp   | WireGuard (clients ↔ gerbil)      |
+| Port | Proto | Purpose                                      |
+| ---- | ----- | --------------------------------------------- |
+| 80   | tcp   | ACME HTTP-01 challenge (`tls_letsencrypt_listen`) |
+| 443  | tcp   | headscale itself: the Tailscale client protocol *and* `/api/v1/*` |
 
 Your router/firewall must forward these from your WAN address to this host —
 that's outside this repo's scope. You also need DNS: an A/AAAA record for
-`dashboardDomain` and a wildcard record for `*.baseDomain`, both pointed at
-your WAN address.
+`serverUrl`'s hostname pointed at your WAN address. `baseDomain` (for
+MagicDNS) needs no DNS record of its own — headscale resolves it internally
+for tailnet clients, not the public internet.
 
-Everything else is unattended: `server.secret` is generated on the guest's own
-persistent volume the first time it's missing (nothing to provision by hand,
-unlike newt's config file below), and Pangolin/gerbil/traefik's own config
-files are rendered from `dashboardDomain`, `baseDomain` and `letsEncryptEmail`
-at build time.
-
-After the first switch, watch it come up and grab the one-time setup token
-from `journalctl -u microvm@pangolin -f` on the host (see the note on
-`docker-pangolin`'s console logging above), then open
-`https://<dashboardDomain>/auth/initial-setup` — or, before DNS/port-forwarding
-are even live, reach the dashboard directly over the bridge at
-`http://<pangolin address>:3002` — to create an admin account and your first
-organization. From there, add **Resources** (public hostnames under
-`baseDomain`) pointed at their **Targets** (an address on the guest bridge,
-e.g. another guest's IP:port) — this is the Pangolin-dashboard equivalent of
-what used to be configured in the Cloudflare Zero Trust dashboard.
-
-Docker's own image/layer storage and Pangolin's config/db/certs each live on a
-persistent volume (`/var/lib/docker` and `/var/lib/pangolin` respectively), so
-neither is re-pulled nor regenerated across guest restarts.
-
-## newt guest
-
-`newt` (10.100.0.2) is Pangolin's lightweight site connector — a fully
-userspace WireGuard client (no kernel module or capabilities needed) that
-dials out to the pangolin guest and proxies whatever targets are registered
-against it. It plays the same "dashboard-managed, only needs one credential"
-role cloudflared used to.
-
-To provision it: in the Pangolin dashboard, add a **Site** of type **Newt**,
-which gives you a Newt ID and secret. Then, on the host, after the first
-switch:
+**`/api/v1/*` is not network-isolated from the client protocol.** headscale
+serves both on the same TLS listener with no config knob to split them onto
+different paths or ports, so the REST API is technically reachable from the
+WAN. It's bearer-token gated (401 without a valid API key), and this repo
+never provisions a long-lived key ahead of time — mint one on demand, over
+SSH, only when you actually need it:
 
 ```
-sudo install -d -m 0755 -o microvm -g kvm /var/lib/microvms/newt
-sudo install -m 0400 -o microvm -g kvm /dev/stdin /var/lib/microvms/newt/newt-config.json <<'EOF'
-{
-  "endpoint": "http://10.100.0.4:3000",
-  "id": "<newt id from the dashboard>",
-  "secret": "<newt secret from the dashboard>"
-}
-EOF
-sudo systemctl start microvm@newt
+ssh root@10.100.0.2 headscale apikeys create --expiration 90d
 ```
 
-`endpoint` above is `qt1.infra.guests.pangolin.internalUrl`: this newt site is
-this repo's own, colocated on the same guest bridge as the pangolin guest, so
-it talks to Pangolin's API directly over the bridge instead of round-tripping
-through the WAN entrypoint, DNS and TLS to reach itself. It's otherwise no
-different from — and authenticates the same way as — a newt site running
-anywhere else.
+gRPC (`grpc_listen_addr`) is unaffected by any of this: it defaults to
+`127.0.0.1` only and is never in `forwardPorts` above, so it's unreachable
+from the WAN regardless. The local `headscale` CLI (used above, and by
+`headscale-mint-tailscale-authkey` below) talks over a unix socket instead,
+so it never needs gRPC at all.
 
-The config file is only read when the VM boots: after changing it, run
-`sudo systemctl restart microvm@newt`. It is passed in as a systemd credential
-(qemu runner only), so it never lands in the Nix store. newt's logs are on the
-host, in `journalctl -u microvm@newt`.
+Everything else is unattended: headscale generates its own Noise/DERP private
+keys and its Let's Encrypt cert cache under `/var/lib/headscale` (a
+persistent volume) the first time it's missing, no different from how it
+behaves on bare metal. `serverUrl`, `baseDomain`, `letsEncryptEmail` and
+`adminSshKey` have no defaults and must be set when enabling the guest — see
+the snippet above.
+
+`adminSshKey` authorizes root SSH into the guest, key-only, reachable only
+from the host (not from other guests on the bridge or the WAN) — needed
+because the `headscale` CLI (`headscale users create`, `headscale apikeys
+create`, ...) talks to the running server over a local socket, so it has to
+run on the guest itself: `ssh root@10.100.0.2 headscale --help`.
+
+**Nothing here survives a from-scratch reinstall of the host.** The node/key
+database, both generated private keys and the Let's Encrypt cache all live
+under `/var/lib/headscale` on the host's own root filesystem — there's no
+separate persistent dataset backing it. Back that directory up before
+reinstalling, or be ready to reprovision and have every Tailscale client
+re-register against a fresh instance.
+
+## Joining the tailnet (`qt1.infra.tailscaleClient`)
+
+Any machine — the bare host or a guest — can join the tailnet this repo's own
+headscale coordinates, via `qt1.infra.tailscaleClient`:
+
+```nix
+qt1.infra.tailscaleClient = {
+  enable = true;
+  loginServerUrl = config.qt1.infra.guests.headscale.serverUrl;
+  authKeyFile = config.qt1.infra.guests.headscale.tailscaleAuthKeyFile;
+  # ephemeral = true;   # set for machines with non-persistent state
+};
+```
+
+**For anything already on the guest bridge — the host, or another guest —
+also add a `networking.hosts` entry pointing `serverUrl`'s hostname at the
+headscale guest's own bridge address:**
+
+```nix
+networking.hosts.${config.qt1.infra.guests.headscale.address} = [
+  config.qt1.infra.guests.headscale.tlsHostname
+];
+```
+
+This resolves the same public hostname straight to the bridge instead of out
+through the WAN and back in via the router's port forward (NAT hairpinning,
+which not every router supports reliably) — the TLS handshake still
+validates correctly, since the certificate is for the hostname, not whichever
+IP you actually connected to. Skip this for a genuinely external Tailscale
+client (a phone, a laptop away from home); it has no bridge to shortcut
+through and just uses `serverUrl` over the WAN normally.
+
+**No manual step here, unlike the guest's own secrets above — including the
+pre-auth key itself.** Minting one normally requires headscale already
+running and a user already created in it, which is exactly what
+`headscale-mint-tailscale-authkey` does on the host, unattended: it waits for
+the headscale guest's SSH to come up, using a second host-generated keypair
+(distinct from `adminSshKey`, authorized the same way, see
+`automationSshKeyFile`) to create a `tailnetUser` (default `homelab`) if it
+doesn't exist and mint it a reusable, 10-year pre-auth key at
+`tailscaleAuthKeyFile`. Every consumer points at that same shared file.
+Idempotent on that file already existing, so this only ever runs for real
+once; to rotate the key, remove the file and restart:
+
+```
+sudo rm /var/lib/microvms/headscale/tailscale-authkey
+sudo systemctl restart headscale-mint-tailscale-authkey
+```
+
+The headscale guest itself is deliberately not a tailnet member — the
+coordination server being its own client would mean reaching itself back
+through its own tunnel, which is more circularity than it's worth.
 
 ## Adding a guest
 
 1. `guests/<name>.nix` — the guest's NixOS config, as a function of its network
-   coordinates (see `guests/newt.nix`). microvm.nix evaluates guests in
+   coordinates (see `guests/headscale.nix`). microvm.nix evaluates guests in
    a nested `nixosSystem` that receives none of the host's specialArgs, so pass
    anything it needs explicitly.
 2. `modules/guests/<name>.nix` — `qt1.infra.guests.<name>` options and the
