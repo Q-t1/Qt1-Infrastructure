@@ -257,8 +257,12 @@ in
         done
 
         find_user_id() {
+          # headscale prints the bare JSON `null` (not `[]`) for an empty
+          # user list, e.g. on a genuinely fresh server before this script
+          # has created anyone yet — `(. // [])` normalizes that so `.[]`
+          # doesn't choke on it.
           remote headscale users list --output json \
-            | jq -r --arg name ${lib.escapeShellArg cfg.tailnetUser} '.[] | select(.name == $name) | .id'
+            | jq -r --arg name ${lib.escapeShellArg cfg.tailnetUser} '(. // [])[] | select(.name == $name) | .id'
         }
 
         user_id=$(find_user_id)
