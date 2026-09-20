@@ -1,7 +1,7 @@
-# Host side of the headscale guest: the VM entry, its two host-generated
-# credentials and the WAN port forwarding that makes it reachable — unlike
-# the old Cloudflare Tunnel/Pangolin split, headscale terminates its own TLS
-# and needs real inbound ports the same way Pangolin's gerbil/traefik did.
+# Host side of the headscale guest: the VM entry and its two host-generated
+# credentials. No WAN port forwarding here — the caddy guest
+# (../modules/guests/caddy.nix) is what's actually reachable from the WAN
+# now; this one only needs to be reachable from caddy, over the bridge.
 # The guest's own configuration is ../../guests/headscale.nix.
 {
   config,
@@ -35,11 +35,11 @@ in
       example = "https://access.example.com";
       description = ''
         Public URL Tailscale clients reach headscale at (`https://`, no
-        trailing slash) — also what headscale requests its Let's Encrypt
-        certificate for. Needs a DNS record pointing at this host's WAN
-        address, and this host's router/firewall must forward ports 80/tcp
-        (ACME HTTP-01 challenge) and 443/tcp (the server itself) to it — see
-        forwardPorts below and the README.
+        trailing slash). headscale itself only listens plain HTTP on the
+        bridge (internalPort below) — the caddy guest
+        (qt1.infra.guests.caddy) is what actually terminates TLS for this
+        hostname and needs a DNS record pointing at this host's WAN address;
+        see its own option docs and the README.
       '';
     };
 
@@ -48,11 +48,24 @@ in
       default = lib.removePrefix "https://" cfg.serverUrl;
       readOnly = true;
       description = ''
-        serverUrl with its scheme stripped. A bridge-local consumer of
-        tailscaleClient (the host, or another guest) should point this
-        hostname at `address` via its own `networking.hosts`, so it reaches
-        headscale directly over the bridge instead of round-tripping through
-        the WAN/NAT — see the README's "Joining the tailnet" section.
+        serverUrl with its scheme stripped. This is what the caddy guest
+        requests its Let's Encrypt certificate for, and what a bridge-local
+        consumer of tailscaleClient (the host, or another guest) should
+        point at qt1.infra.guests.caddy.address via its own
+        `networking.hosts`, so it reaches caddy directly over the bridge
+        instead of round-tripping through the WAN/NAT — see the README's
+        "Joining the tailnet" section.
+      '';
+    };
+
+    internalPort = lib.mkOption {
+      type = lib.types.port;
+      default = 8080;
+      readOnly = true;
+      description = ''
+        Port headscale listens on for plain HTTP on the guest bridge, once
+        caddy is fronting it for TLS — not reachable from the WAN. What
+        qt1.infra.guests.caddy reverse-proxies to.
       '';
     };
 
@@ -65,12 +78,6 @@ in
         serverUrl's. No DNS record needed for this one — headscale resolves
         it itself, to tailnet-internal addresses, not the public internet.
       '';
-    };
-
-    letsEncryptEmail = lib.mkOption {
-      type = lib.types.str;
-      example = "you@example.com";
-      description = "Contact address for Let's Encrypt certificate issuance.";
     };
 
     adminSshKey = lib.mkOption {
@@ -153,7 +160,7 @@ in
             mac
             serverUrl
             baseDomain
-            letsEncryptEmail
+            internalPort
             adminSshKey
             ;
           inherit (host) prefixLength;
@@ -282,21 +289,5 @@ in
         mv "$dest.tmp" "$dest"
       '';
     };
-
-    # Real inbound ports, unlike the old cloudflared tunnel: headscale
-    # terminates its own TLS and needs the ACME HTTP-01 challenge and the
-    # server's own HTTPS port to actually reach the guest.
-    networking.nat.forwardPorts = [
-      {
-        sourcePort = 80;
-        destination = "${cfg.address}:80";
-        proto = "tcp";
-      }
-      {
-        sourcePort = 443;
-        destination = "${cfg.address}:443";
-        proto = "tcp";
-      }
-    ];
   };
 }

@@ -10,8 +10,11 @@
     enable = true;
     serverUrl = "https://access.example.com";
     baseDomain = "tailnet.example.com";
-    letsEncryptEmail = "you@example.com";
     adminSshKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDummyKeyForEvalOnly test@example.com";
+  };
+  qt1.infra.guests.caddy = {
+    enable = true;
+    letsEncryptEmail = "you@example.com";
   };
   qt1.infra.tailscaleClient = {
     enable = true;

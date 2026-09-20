@@ -16,6 +16,8 @@ modules/microvm-host.nix         guest bridge + NAT           (qt1.infra.microvm
 modules/tailscale-client.nix     join the tailnet             (qt1.infra.tailscaleClient)
 modules/guests/headscale.nix     host-side VM declaration     (qt1.infra.guests.headscale)
 guests/headscale.nix             the guest's own NixOS config
+modules/guests/caddy.nix         host-side VM declaration     (qt1.infra.guests.caddy)
+guests/caddy.nix                 the guest's own NixOS config
 checks/test-host.nix             minimal host, used only to build this layer alone
 ```
 
@@ -51,8 +53,11 @@ qt1.infra = {
     enable = true;
     serverUrl = "https://access.example.com";
     baseDomain = "tailnet.example.com";   # must differ from serverUrl's domain
-    letsEncryptEmail = "you@example.com";
     adminSshKey = "ssh-ed25519 AAAA... you@yourhost";
+  };
+  guests.caddy = {
+    enable = true;
+    letsEncryptEmail = "you@example.com";
   };
 };
 ```
@@ -71,52 +76,76 @@ nix eval .#nixosConfigurations.infra-test.config.system.build.toplevel.drvPath
 
 The second form only evaluates, so it works from macOS.
 
-## headscale guest
+## caddy guest
 
-`headscale` (10.100.0.2) is the WAN-facing entrypoint into the local
-infrastructure — a self-hosted [headscale](https://github.com/juanfont/headscale)
-coordination server for Tailscale, run entirely from nixpkgs' own
-`services.headscale` module (no Docker, no separate reverse proxy). Unlike
-the old Cloudflare Tunnel or the Pangolin stack this repo ran before it,
-headscale terminates its own TLS via built-in Let's Encrypt
-(`tls_letsencrypt_hostname`), so **this guest needs real inbound ports**. The
-host forwards them in from the WAN (`networking.nat.forwardPorts`, wired by
-`modules/guests/headscale.nix`):
+`caddy` (10.100.0.3) is the WAN-facing entrypoint into the local
+infrastructure — a [Caddy](https://caddyserver.com) reverse proxy, run from
+nixpkgs' own `services.caddy` module (no Docker), whose only job is
+terminating TLS for headscale and gating what's actually allowed through to
+it. **This guest needs real inbound ports.** The host forwards them in from
+the WAN (`networking.nat.forwardPorts`, wired by `modules/guests/caddy.nix`):
 
-| Port | Proto | Purpose                                      |
-| ---- | ----- | --------------------------------------------- |
-| 80   | tcp   | ACME HTTP-01 challenge (`tls_letsencrypt_listen`) |
-| 443  | tcp   | headscale itself: the Tailscale client protocol *and* `/api/v1/*` |
+| Port | Proto | Purpose                                    |
+| ---- | ----- | ------------------------------------------- |
+| 80   | tcp   | ACME HTTP-01 challenge, http→https redirect |
+| 443  | tcp   | HTTPS: the Tailscale client protocol, proxied through to headscale |
 
 Your router/firewall must forward these from your WAN address to this host —
 that's outside this repo's scope. You also need DNS: an A/AAAA record for
-`serverUrl`'s hostname pointed at your WAN address. `baseDomain` (for
-MagicDNS) needs no DNS record of its own — headscale resolves it internally
-for tailnet clients, not the public internet.
+`qt1.infra.guests.headscale.serverUrl`'s hostname, pointed at your WAN
+address (this is the *only* DNS record needed — not a wildcard; nothing here
+uses subdomains-per-resource the way the old Pangolin stack did).
 
-**`/api/v1/*` is not network-isolated from the client protocol.** headscale
-serves both on the same TLS listener with no config knob to split them onto
-different paths or ports, so the REST API is technically reachable from the
-WAN. It's bearer-token gated (401 without a valid API key), and this repo
-never provisions a long-lived key ahead of time — mint one on demand, over
-SSH, only when you actually need it:
+**`/api/v1/*` (headscale's REST API) is not proxied through at all** — this
+is the whole reason caddy sits in front rather than leaving headscale to
+terminate its own TLS (which it can do, but can't split `/api` off from the
+client protocol on the same listener). Caddy's own Caddyfile
+(`guests/caddy.nix`) matches `/api/*` and returns a bare 404 before it ever
+reaches headscale; every other path is reverse-proxied to headscale's
+internal address. For anything that would otherwise need `/api/v1` from
+outside the bridge, use the local `headscale` CLI over SSH instead — see the
+headscale guest section below.
+
+Caddy's own certificate and ACME account data live under `/var/lib/caddy`, a
+persistent volume, so a guest restart doesn't mean re-issuing a certificate
+(and burning into Let's Encrypt's rate limit) every time. There's no SSH into
+this guest — it's entirely declared here, nothing to run a CLI against — so
+its logs are mirrored to the serial console instead: `journalctl -u
+microvm@caddy` on the host.
+
+## headscale guest
+
+`headscale` is a self-hosted [headscale](https://github.com/juanfont/headscale)
+coordination server for Tailscale, run entirely from nixpkgs' own
+`services.headscale` module (no Docker). Unlike the old Cloudflare Tunnel or
+the Pangolin stack this repo ran before it, headscale is not itself
+WAN-facing: it only listens plain HTTP on the guest bridge
+(`internalPort`, `10.100.0.2:8080` by default) and is reached from the
+outside only through the caddy guest above, which is what actually holds
+the TLS certificate for `serverUrl`'s hostname.
+
+`/api/v1/*` is bearer-token gated on its own (401 without a valid API key),
+but with caddy in front that's now a second layer, not the only one — see
+the caddy section above for what actually keeps it off the WAN. This repo
+never provisions a long-lived API key ahead of time either way — mint one on
+demand, over SSH, only when you actually need it:
 
 ```
 ssh root@10.100.0.2 headscale apikeys create --expiration 90d
 ```
 
 gRPC (`grpc_listen_addr`) is unaffected by any of this: it defaults to
-`127.0.0.1` only and is never in `forwardPorts` above, so it's unreachable
-from the WAN regardless. The local `headscale` CLI (used above, and by
-`headscale-mint-tailscale-authkey` below) talks over a unix socket instead,
-so it never needs gRPC at all.
+`127.0.0.1` only and was never in the WAN forwardPorts to begin with, so
+it's unreachable from the WAN regardless. The local `headscale` CLI (used
+above, and by `headscale-mint-tailscale-authkey` below) talks over a unix
+socket instead, so it never needs gRPC at all.
 
 Everything else is unattended: headscale generates its own Noise/DERP private
-keys and its Let's Encrypt cert cache under `/var/lib/headscale` (a
-persistent volume) the first time it's missing, no different from how it
-behaves on bare metal. `serverUrl`, `baseDomain`, `letsEncryptEmail` and
-`adminSshKey` have no defaults and must be set when enabling the guest — see
-the snippet above.
+keys under `/var/lib/headscale` (a persistent volume) the first time it's
+missing, no different from how it behaves on bare metal. `serverUrl`,
+`baseDomain` and `adminSshKey` have no defaults and must be set when
+enabling the guest — see the snippet above; `letsEncryptEmail` lives on
+`qt1.infra.guests.caddy` now, since caddy is what does ACME.
 
 `adminSshKey` authorizes root SSH into the guest, key-only, reachable only
 from the host (not from other guests on the bridge or the WAN) — needed
@@ -125,9 +154,9 @@ create`, ...) talks to the running server over a local socket, so it has to
 run on the guest itself: `ssh root@10.100.0.2 headscale --help`.
 
 **Nothing here survives a from-scratch reinstall of the host.** The node/key
-database, both generated private keys and the Let's Encrypt cache all live
-under `/var/lib/headscale` on the host's own root filesystem — there's no
-separate persistent dataset backing it. Back that directory up before
+database and both generated private keys live under `/var/lib/headscale` on
+the host's own root filesystem — there's no separate persistent dataset
+backing it (same for caddy's `/var/lib/caddy`). Back these up before
 reinstalling, or be ready to reprovision and have every Tailscale client
 re-register against a fresh instance.
 
@@ -147,10 +176,11 @@ qt1.infra.tailscaleClient = {
 
 **For anything already on the guest bridge — the host, or another guest —
 also add a `networking.hosts` entry pointing `serverUrl`'s hostname at the
-headscale guest's own bridge address:**
+*caddy* guest's own bridge address** (caddy holds the TLS certificate now,
+not headscale — see the caddy guest section above):
 
 ```nix
-networking.hosts.${config.qt1.infra.guests.headscale.address} = [
+networking.hosts.${config.qt1.infra.guests.caddy.address} = [
   config.qt1.infra.guests.headscale.tlsHostname
 ];
 ```
