@@ -61,6 +61,12 @@ in
           upstream = "${headscale.address}:${toString headscale.internalPort}";
         })
       ];
+      # storeOnDisk defaults to true (nothing here shares the host's
+      # /nix/store into the guest), which defaults systemSymlink to false —
+      # that drops share/microvm/system, which `microvm -l` requires to
+      # function at all (it dies under set -e the moment readlink on that
+      # path fails, for every guest, silently).
+      microvm.systemSymlink = true;
     };
 
     # Real inbound ports: caddy is now the WAN-facing TLS terminator,

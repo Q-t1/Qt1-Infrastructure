@@ -169,6 +169,12 @@ in
           adminSshKeys = host.adminSshKeys ++ cfg.adminSshKeys;
         })
       ];
+      # storeOnDisk defaults to true (nothing here shares the host's
+      # /nix/store into the guest), which defaults systemSymlink to false —
+      # that drops share/microvm/system, which `microvm -l` requires to
+      # function at all (it dies under set -e the moment readlink on that
+      # path fails, for every guest, silently).
+      microvm.systemSymlink = true;
       microvm.credentialFiles = {
         ssh-host-ed25519-key = cfg.sshHostKeyFile;
         automation-ssh-pubkey = "${cfg.automationSshKeyFile}.pub";
