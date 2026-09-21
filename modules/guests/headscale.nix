@@ -80,15 +80,17 @@ in
       '';
     };
 
-    adminSshKey = lib.mkOption {
-      type = lib.types.str;
-      example = "ssh-ed25519 AAAA... user@host";
+    adminSshKeys = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      example = [ "ssh-ed25519 AAAA... user@host" ];
       description = ''
-        Public key authorized for root SSH on the guest, key-only and
-        reachable only from the host (not from other guests on the bridge or
-        the WAN). Needed because the `headscale` CLI (e.g. `apikeys create`)
-        talks to the running server over a local unix socket, so it has to
-        run on this guest itself.
+        Public keys authorized for root SSH on the guest, on top of
+        qt1.infra.microvmHost.adminSshKeys (the host-wide default) —
+        key-only and reachable only from the host (not from other guests on
+        the bridge or the WAN). Needed because the `headscale` CLI (e.g.
+        `apikeys create`) talks to the running server over a local unix
+        socket, so it has to run on this guest itself.
       '';
     };
 
@@ -112,7 +114,7 @@ in
       default = "/var/lib/microvms/headscale/automation-ssh-key";
       description = ''
         Host path holding a second, host-only SSH keypair (distinct from
-        adminSshKey), generated the same way as sshHostKeyFile. Its public
+        adminSshKeys), generated the same way as sshHostKeyFile. Its public
         half is authorized for root on the guest too, so
         headscale-mint-tailscale-authkey can run `headscale` commands without
         a human present; its private half never leaves the host.
@@ -161,10 +163,10 @@ in
             serverUrl
             baseDomain
             internalPort
-            adminSshKey
             ;
           inherit (host) prefixLength;
           gateway = host.hostAddress;
+          adminSshKeys = host.adminSshKeys ++ cfg.adminSshKeys;
         })
       ];
       microvm.credentialFiles = {

@@ -10,7 +10,7 @@
     enable = true;
     serverUrl = "https://access.example.com";
     baseDomain = "tailnet.example.com";
-    adminSshKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDummyKeyForEvalOnly test@example.com";
+    adminSshKeys = [ "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDummyKeyForEvalOnly test@example.com" ];
   };
   qt1.infra.guests.caddy = {
     enable = true;

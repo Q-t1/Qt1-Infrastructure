@@ -21,10 +21,11 @@
 # SSH is enabled for root, key-only, and reachable only from the host (not
 # from other guests on the bridge or the WAN) — the `headscale` CLI (e.g.
 # `apikeys create`, `preauthkeys create`) talks to the running server over a
-# local unix socket, so it has to run on this guest itself. Two keys are
-# authorized: adminSshKey for a human, and a host-generated one for
-# headscale-mint-tailscale-authkey to run unattended (see
-# ../modules/guests/headscale.nix).
+# local unix socket, so it has to run on this guest itself. adminSshKeys
+# (humans plus the host's own default keys, see
+# qt1.infra.microvmHost.adminSshKeys) are authorized alongside a separate,
+# host-generated key for headscale-mint-tailscale-authkey to run unattended
+# (see ../modules/guests/headscale.nix).
 #
 # Called with its network coordinates and public hostname by the host-side
 # module; guests are evaluated by microvm.nix in a nested nixosSystem that
@@ -38,7 +39,7 @@
   serverUrl,
   baseDomain,
   internalPort,
-  adminSshKey,
+  adminSshKeys,
 }:
 
 { lib, ... }:
@@ -113,15 +114,15 @@
     };
   };
   # authorizedKeysFiles is additive with the default NixOS sets from
-  # users.users.root.openssh.authorizedKeys.keys below, so root accepts
-  # either key: adminSshKey for a human, this credential for
-  # headscale-mint-tailscale-authkey running unattended on the host.
+  # users.users.root.openssh.authorizedKeys.keys below, so root accepts any
+  # of: adminSshKeys, this credential for headscale-mint-tailscale-authkey
+  # running unattended on the host.
   services.openssh.authorizedKeysFiles = [ "/run/credentials/sshd.service/automation-ssh-pubkey" ];
   systemd.services.sshd.serviceConfig.ImportCredential = [
     "ssh-host-ed25519-key"
     "automation-ssh-pubkey"
   ];
-  users.users.root.openssh.authorizedKeys.keys = [ adminSshKey ];
+  users.users.root.openssh.authorizedKeys.keys = adminSshKeys;
 
   services.headscale = {
     enable = true;

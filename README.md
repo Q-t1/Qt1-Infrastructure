@@ -48,12 +48,15 @@ qt1.infra = {
   microvmHost = {
     enable = true;
     uplinkInterface = "enp2s0";   # the only OS fact this layer needs
+    # Trusted for root on every guest that exposes SSH, by default (see
+    # "headscale guest" below) — e.g. the host's own SSH identity.
+    adminSshKeys = [ "ssh-ed25519 AAAA... root@yourhost" ];
   };
   guests.headscale = {
     enable = true;
     serverUrl = "https://access.example.com";
     baseDomain = "tailnet.example.com";   # must differ from serverUrl's domain
-    adminSshKey = "ssh-ed25519 AAAA... you@yourhost";
+    adminSshKeys = [ "ssh-ed25519 AAAA... you@yourhost" ];
   };
   guests.caddy = {
     enable = true;
@@ -142,16 +145,18 @@ socket instead, so it never needs gRPC at all.
 
 Everything else is unattended: headscale generates its own Noise/DERP private
 keys under `/var/lib/headscale` (a persistent volume) the first time it's
-missing, no different from how it behaves on bare metal. `serverUrl`,
-`baseDomain` and `adminSshKey` have no defaults and must be set when
-enabling the guest — see the snippet above; `letsEncryptEmail` lives on
-`qt1.infra.guests.caddy` now, since caddy is what does ACME.
+missing, no different from how it behaves on bare metal. `serverUrl` and
+`baseDomain` have no defaults and must be set when enabling the guest — see
+the snippet above; `letsEncryptEmail` lives on `qt1.infra.guests.caddy` now,
+since caddy is what does ACME.
 
-`adminSshKey` authorizes root SSH into the guest, key-only, reachable only
+`adminSshKeys` authorizes root SSH into the guest, key-only, reachable only
 from the host (not from other guests on the bridge or the WAN) — needed
 because the `headscale` CLI (`headscale users create`, `headscale apikeys
 create`, ...) talks to the running server over a local socket, so it has to
-run on the guest itself: `ssh root@10.100.0.2 headscale --help`.
+run on the guest itself: `ssh root@10.100.0.2 headscale --help`. The guest
+trusts `qt1.infra.microvmHost.adminSshKeys` (the host-wide default — every
+SSH-exposed guest trusts these) plus this guest's own `adminSshKeys`, combined.
 
 **Nothing here survives a from-scratch reinstall of the host.** The node/key
 database and both generated private keys live under `/var/lib/headscale` on
@@ -198,7 +203,7 @@ pre-auth key itself.** Minting one normally requires headscale already
 running and a user already created in it, which is exactly what
 `headscale-mint-tailscale-authkey` does on the host, unattended: it waits for
 the headscale guest's SSH to come up, using a second host-generated keypair
-(distinct from `adminSshKey`, authorized the same way, see
+(distinct from `adminSshKeys`, authorized the same way, see
 `automationSshKeyFile`) to create a `tailnetUser` (default `homelab`) if it
 doesn't exist and mint it a reusable, 10-year pre-auth key at
 `tailscaleAuthKeyFile`. Every consumer points at that same shared file.

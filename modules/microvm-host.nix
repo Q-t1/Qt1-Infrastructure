@@ -39,6 +39,20 @@ in
       default = 24;
       description = "Prefix length of the guest network.";
     };
+
+    adminSshKeys = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      example = [ "ssh-ed25519 AAAA... root@host" ];
+      description = ''
+        SSH public keys authorized for root on every guest that exposes SSH
+        (currently just qt1.infra.guests.headscale — see its own
+        adminSshKeys option for why SSH is open there at all). Meant for a
+        key that should reach every guest without repeating it per guest,
+        such as the host's own SSH identity; a guest's adminSshKeys option
+        adds to this list rather than replacing it.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
