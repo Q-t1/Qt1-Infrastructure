@@ -17,6 +17,7 @@
     letsEncryptEmail = "you@example.com";
   };
   qt1.infra.crowdsec.enable = true;
+  qt1.infra.guests.monitoring.enable = true;
   qt1.infra.tailscaleClient = {
     enable = true;
     loginServerUrl = config.qt1.infra.guests.headscale.serverUrl;

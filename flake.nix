@@ -52,6 +52,7 @@
             ./modules/guests/headscale.nix
             ./modules/guests/caddy.nix
             ./modules/crowdsec.nix
+            ./modules/guests/monitoring.nix
           ];
         };
       };

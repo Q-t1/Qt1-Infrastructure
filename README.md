@@ -19,6 +19,8 @@ guests/headscale.nix             the guest's own NixOS config
 modules/guests/caddy.nix         host-side VM declaration     (qt1.infra.guests.caddy)
 guests/caddy.nix                 the guest's own NixOS config
 modules/crowdsec.nix             host-side CrowdSec + bouncer (qt1.infra.crowdsec)
+modules/guests/monitoring.nix    host-side VM + collection    (qt1.infra.guests.monitoring)
+guests/monitoring.nix            the guest's own NixOS config
 checks/test-host.nix             minimal host, used only to build this layer alone
 ```
 
@@ -64,6 +66,7 @@ qt1.infra = {
     letsEncryptEmail = "you@example.com";
   };
   crowdsec.enable = true;   # optional: bans offenders against caddy's logs
+  guests.monitoring.enable = true;   # optional: Loki+Prometheus+Grafana, tailnet-only
 };
 ```
 
@@ -263,6 +266,74 @@ account, no shared community blocklist). Wiring that in is a matter of
 setting `services.crowdsec.settings.capi.credentialsFile` yourself; it's
 left out here deliberately, since the upstream module's auto-registration
 script has a rough edge that can fail a restart after the first run.
+
+## monitoring guest (`qt1.infra.guests.monitoring`)
+
+Optional, off by default. Bundles [Loki](https://grafana.com/oss/loki/),
+[Prometheus](https://prometheus.io) and [Grafana](https://grafana.com) into
+one guest (`10.100.0.4`) — all three from nixpkgs' own modules, no Docker —
+since none of them is independently useful here; they exist purely to back
+this one Grafana instance:
+
+```nix
+qt1.infra.guests.monitoring.enable = true;
+```
+
+Requires both `guests.headscale` and `guests.caddy` (see below for why).
+**Collection itself happens on the host**, alongside `qt1.infra.crowdsec`,
+not inside this guest:
+
+- **Metrics**: a plain `node_exporter` on the host, bridge-bound only
+  (`10.100.0.1:9100`, never the WAN-facing uplink), scraped by Prometheus
+  inside the guest. Host-only for now — the `headscale`/`caddy` guests don't
+  run their own exporters, so you get whole-box resource metrics (which
+  covers every guest from the outside) but not per-guest internals.
+- **Logs**: [Grafana Alloy](https://grafana.com/docs/alloy/) on the host
+  tails the whole host journal and pushes it to this guest's Loki.
+  `services.promtail` was removed upstream (end of life) — Alloy is its
+  nixpkgs-blessed replacement. This is the same host journal
+  `qt1.infra.crowdsec` already reads from: caddy's access log and
+  crowdsec's own logs both land there and ship to Loki too. headscale's own
+  application logs don't (it never mirrors its console to the host journal
+  the way caddy does) — out of scope for now.
+
+Both Loki and Prometheus default to 30 days' retention, sized against the
+guest's own volumes (`/var/lib/loki` 8G, `/var/lib/prometheus2` 4G).
+
+**Reachable only over the tailnet — this is the actual point of the guest.**
+Three things enforce that, stacked:
+
+1. Like every other guest here, it never appears in the host's
+   `networking.nat.forwardPorts` — structurally unreachable from the WAN.
+2. Grafana's port (3000) is opened only on the guest's own `tailscale0`
+   interface, not the bridge — so even another guest on `10.100.0.0/24`
+   can't reach it, only tailnet peers.
+3. Loki's push port (3100) is opened on the bridge, but source-restricted to
+   the host's own address only (the same `iptables`-source-IP trick the
+   headscale guest uses to scope its SSH) — nothing else on the bridge can
+   reach it either.
+
+This guest joins the tailnet itself (`qt1.infra.tailscaleClient`, using the
+same shared pre-auth key every other consumer does — see "Joining the
+tailnet" above) as its *only* route in, which is also why it needs
+`guests.caddy`: the NAT-hairpin shortcut described there
+(`networking.hosts` pointing headscale's hostname at caddy's bridge address)
+is baked into `guests/monitoring.nix` directly, not left as a manual step.
+
+Once tailnet-joined yourself, reach it at `http://monitoring.<baseDomain>:3000`
+(MagicDNS; `baseDomain` is `qt1.infra.guests.headscale.baseDomain`). Grafana's
+initial admin password is host-generated, unattended, the same pattern as
+every other secret in this repo:
+
+```
+sudo cat /var/lib/microvms/monitoring/grafana-admin-password
+```
+
+**Nothing here survives a from-scratch reinstall of the host** — same
+caveat as the headscale/caddy guests: `/var/lib/loki`, `/var/lib/prometheus2`
+and `/var/lib/grafana` are plain root-fs volume images, not backed by
+anything else. Back them up before reinstalling if the history matters to
+you, or accept starting fresh.
 
 ## Adding a guest
 
