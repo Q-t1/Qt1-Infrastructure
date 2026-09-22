@@ -110,23 +110,29 @@ in
     # got scoped down to its own directory.
     systemd.services.crowdsec.serviceConfig.StateDirectory = "crowdsec";
 
-    # Upstream's crowdsec-firewall-bouncer-register.service (part of
-    # services.crowdsec-firewall-bouncer below, not this module) declares
-    # `StateDirectory = "crowdsec-firewall-bouncer-register crowdsec"`. That
-    # second name is what actually breaks crowdsec.service itself:
-    # DynamicUser's StateDirectory machinery turns /var/lib/crowdsec into a
-    # symlink into the root-only /var/lib/private/, and only sets up the
-    # bind mount that makes it writable *inside this register unit's own
-    # sandbox* — not crowdsec.service's, which only has plain
-    # ReadWritePaths and has no way through that symlink anymore
-    # (`mkdir: cannot create directory '/var/lib/crowdsec': Permission
-    # denied` the first time crowdsec.service starts after this one has).
-    # The register script never actually touches /var/lib/crowdsec — it
-    # only writes its own api-key.cred and talks to the LAPI over HTTP —
-    # so the fix is dropping the claim here, not chasing it in the main
-    # service.
-    systemd.services.crowdsec-firewall-bouncer-register.serviceConfig.StateDirectory =
-      lib.mkForce "crowdsec-firewall-bouncer-register";
+    # NOTE for readers of the git history: an earlier version of this file
+    # stripped "crowdsec" out of crowdsec-firewall-bouncer-register.service's
+    # own StateDirectory (upstream declares
+    # `StateDirectory = "crowdsec-firewall-bouncer-register crowdsec"`),
+    # reasoning that DynamicUser's StateDirectory machinery turning
+    # /var/lib/crowdsec into a symlink into the root-only /var/lib/private/
+    # was what broke crowdsec.service's own (then plain-ReadWritePaths-only)
+    # access to it. That diagnosis was half right: it fixed
+    # crowdsec.service, but on the wrong unit, and broke something this
+    # one separately needs it for. crowdsec.service now has its own
+    # StateDirectory = "crowdsec" (above), which is the actual, unit-scoped
+    # fix, and doesn't care what any other unit with the same claim does —
+    # so upstream's original declaration on this unit is safe to leave
+    # alone, and turns out to be required: `cscli`'s own trace-directory
+    # setup (unrelated to the bouncer-registration logic itself) also
+    # needs to resolve /var/lib/crowdsec, and without a StateDirectory of
+    # its own this unit has no way through that same symlink either
+    # (`Error: while setting up trace directory: mkdir /var/lib/crowdsec:
+    # file exists` — Go's os.MkdirAll can't tell "permission denied
+    # resolving the symlink" from "doesn't exist", tries plain Mkdir, gets
+    # EEXIST from the symlink's own dirent, and re-surfaces that error
+    # once its own fallback Lstat check sees a symlink instead of a
+    # directory).
 
     # That same register unit's script also invokes the raw `cscli`
     # binary directly — unlike every other cscli invocation here, which
