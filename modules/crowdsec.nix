@@ -144,7 +144,15 @@ in
     # hard way, fixing crowdsec.service's own StateDirectory above, that a
     # brand new tmpfiles rule isn't guaranteed applied by the very switch
     # that introduces it. This way there's nothing else to race.
-    systemd.services.crowdsec.serviceConfig.ExecStartPre = [
+    #
+    # mkBefore, not a plain list append: upstream's own ExecStartPre
+    # commands (hub install, machine registration) run first otherwise,
+    # and systemd stops at the first ExecStartPre that fails — so an
+    # unrelated failure in *those* (e.g. a stale machine record from an
+    # earlier broken run) would silently keep this symlink from ever
+    # being created too, reproducing the exact error this exists to fix
+    # for no reason connected to it.
+    systemd.services.crowdsec.serviceConfig.ExecStartPre = lib.mkBefore [
       "${lib.getExe' pkgs.coreutils "ln"} -sf ${crowdsecConfigFile} /etc/crowdsec/config.yaml"
     ];
 
