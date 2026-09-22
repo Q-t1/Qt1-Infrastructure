@@ -86,6 +86,24 @@ in
       settings.lapi.credentialsFile = "/var/lib/crowdsec/state/local_api_credentials.yaml";
     };
 
+    # Upstream's crowdsec-firewall-bouncer-register.service (part of
+    # services.crowdsec-firewall-bouncer below, not this module) declares
+    # `StateDirectory = "crowdsec-firewall-bouncer-register crowdsec"`. That
+    # second name is what actually breaks crowdsec.service itself:
+    # DynamicUser's StateDirectory machinery turns /var/lib/crowdsec into a
+    # symlink into the root-only /var/lib/private/, and only sets up the
+    # bind mount that makes it writable *inside this register unit's own
+    # sandbox* — not crowdsec.service's, which only has plain
+    # ReadWritePaths and has no way through that symlink anymore
+    # (`mkdir: cannot create directory '/var/lib/crowdsec': Permission
+    # denied` the first time crowdsec.service starts after this one has).
+    # The register script never actually touches /var/lib/crowdsec — it
+    # only writes its own api-key.cred and talks to the LAPI over HTTP —
+    # so the fix is dropping the claim here, not chasing it in the main
+    # service.
+    systemd.services.crowdsec-firewall-bouncer-register.serviceConfig.StateDirectory =
+      lib.mkForce "crowdsec-firewall-bouncer-register";
+
     services.crowdsec-firewall-bouncer = {
       enable = true;
 
