@@ -187,6 +187,19 @@ in
       createRulesets = !usingNftables;
     };
 
+    # Upstream's crowdsec-firewall-bouncer.service `requires` the register
+    # unit above (it needs the API key that unit writes, loaded via
+    # LoadCredential) but never adds a matching `after` — `requires`
+    # alone is a failure-propagation dependency, not an ordering one, so
+    # systemd is free to start both in parallel. On a cold start that
+    # race can lose:
+    #   crowdsec-firewall-bouncer.service: Failed to set up credentials: No such file or directory
+    # (Failed at step CREDENTIALS, exit 243) — the bouncer trying to load
+    # a credential file the register unit hasn't written yet.
+    systemd.services.crowdsec-firewall-bouncer.after = [
+      "crowdsec-firewall-bouncer-register.service"
+    ];
+
     networking.nftables.tables = lib.mkIf usingNftables {
       crowdsec = {
         family = "ip";
