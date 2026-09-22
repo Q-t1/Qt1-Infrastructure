@@ -86,6 +86,21 @@ in
       settings.lapi.credentialsFile = "/var/lib/crowdsec/state/local_api_credentials.yaml";
     };
 
+    # Upstream declares crowdsec.service with plain ReadWritePaths for
+    # rootDir (/var/lib/crowdsec), relying on systemd.tmpfiles.settings to
+    # have already created it — but ReadWritePaths doesn't create missing
+    # paths itself, it hard-fails the unit if the target isn't already
+    # there ("Failed to set up mount namespacing: /var/lib/crowdsec: No
+    # such file or directory"), and whether tmpfiles has actually run for
+    # a brand new rule by the time this unit first starts isn't
+    # guaranteed on a `nixos-rebuild switch` that introduces both at once.
+    # StateDirectory= sidesteps that race entirely: it's created directly
+    # by PID1 as part of starting *this* unit, synchronously, every time —
+    # the same mechanism that (as it happens) reliably created this exact
+    # path for crowdsec-firewall-bouncer-register.service below, before it
+    # got scoped down to its own directory.
+    systemd.services.crowdsec.serviceConfig.StateDirectory = "crowdsec";
+
     # Upstream's crowdsec-firewall-bouncer-register.service (part of
     # services.crowdsec-firewall-bouncer below, not this module) declares
     # `StateDirectory = "crowdsec-firewall-bouncer-register crowdsec"`. That
