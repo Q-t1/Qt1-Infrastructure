@@ -77,7 +77,13 @@ in
       # client (it self-registers as a "machine" via `cscli machine add
       # --auto` the first time this file doesn't exist) — mandatory once
       # api.server.enable is true, upstream has no default for it.
-      settings.lapi.credentialsFile = "/var/lib/crowdsec/local_api_credentials.yaml";
+      #
+      # Must live under state/, not directly in /var/lib/crowdsec: the
+      # crowdsec user only owns the subdirectories upstream's own tmpfiles
+      # rules create (state/, hub/, ...) — the bare rootDir stays
+      # root:root 0755, so a file placed straight in it fails to write
+      # with EACCES the first time crowdsec tries to create it.
+      settings.lapi.credentialsFile = "/var/lib/crowdsec/state/local_api_credentials.yaml";
     };
 
     services.crowdsec-firewall-bouncer = {
