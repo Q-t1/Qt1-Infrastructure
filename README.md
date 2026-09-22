@@ -18,6 +18,7 @@ modules/guests/headscale.nix     host-side VM declaration     (qt1.infra.guests.
 guests/headscale.nix             the guest's own NixOS config
 modules/guests/caddy.nix         host-side VM declaration     (qt1.infra.guests.caddy)
 guests/caddy.nix                 the guest's own NixOS config
+modules/crowdsec.nix             host-side CrowdSec + bouncer (qt1.infra.crowdsec)
 checks/test-host.nix             minimal host, used only to build this layer alone
 ```
 
@@ -62,6 +63,7 @@ qt1.infra = {
     enable = true;
     letsEncryptEmail = "you@example.com";
   };
+  crowdsec.enable = true;   # optional: bans offenders against caddy's logs
 };
 ```
 
@@ -218,6 +220,49 @@ sudo systemctl restart headscale-mint-tailscale-authkey
 The headscale guest itself is deliberately not a tailnet member — the
 coordination server being its own client would mean reaching itself back
 through its own tunnel, which is more circularity than it's worth.
+
+## Protecting caddy (`qt1.infra.crowdsec`)
+
+Optional, off by default. When enabled, [CrowdSec](https://www.crowdsec.net)
+runs on the **host** (not its own guest — see the reasoning in
+`modules/crowdsec.nix`) and watches the caddy guest's access log for the
+scenarios in the `crowdsecurity/caddy` hub collection (bruteforce, scanners,
+common HTTP attacks). An offending IP gets banned by the local firewall
+bouncer, which drops it at the host before it ever reaches caddy:
+
+```nix
+qt1.infra.crowdsec.enable = true;
+```
+
+Two things this depends on that are easy to get wrong by hand, so they're
+built in rather than left as setup steps:
+
+- **Caddy needs an access log to begin with** — off by default in caddy
+  itself. `guests/caddy.nix` adds a bare `log` directive for exactly this;
+  without it there's nothing for CrowdSec to read.
+- **The ban has to land on `FORWARD`, not just `INPUT`.** The WAN traffic
+  this protects is never delivered to the host itself — it's `FORWARD`ed
+  on to the caddy guest by `qt1.infra.microvmHost`'s NAT
+  (`networking.nat.forwardPorts`). A bouncer ruleset that only touches
+  `INPUT` (the common default elsewhere) would silently ban IPs that keep
+  right on reaching caddy. This module puts the drop rule on both chains
+  (iptables) or hooks both `input` and `forward` itself (nftables, if
+  `networking.nftables.enable`).
+
+`collections` (default `[ "crowdsecurity/caddy" ]`) is the only knob this
+module exposes — add to it only alongside a matching acquisition of your
+own (`services.crowdsec.localConfig.acquisitions`), since a collection with
+nothing feeding it never sees an event. Everything else — the local API,
+registering the bouncer, minting its API key — is unattended, the same
+pattern as headscale's own secrets above: `cscli bouncers add` runs
+automatically the first time, idempotent after that.
+
+No CrowdSec Console enrollment or central API (CAPI) registration here —
+this is a purely local deployment (local detection, local ban list, no
+account, no shared community blocklist). Wiring that in is a matter of
+setting `services.crowdsec.settings.capi.credentialsFile` yourself; it's
+left out here deliberately, since the upstream module's auto-registration
+script has a rough edge that can fail a restart after the first run.
 
 ## Adding a guest
 

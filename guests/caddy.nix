@@ -92,6 +92,13 @@
       respond @blocked 404
 
       reverse_proxy ${upstream}
+
+      # No access log by default in caddy — this is what actually gives
+      # qt1.infra.crowdsec (../modules/crowdsec.nix) something to read.
+      # Goes to stdout, captured the same way as everything else here (see
+      # systemd.services.caddy.serviceConfig below): mirrored to this
+      # guest's console, and from there to the host's journal.
+      log
     '';
   };
 

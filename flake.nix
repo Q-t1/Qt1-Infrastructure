@@ -51,6 +51,7 @@
             ./modules/tailscale-client.nix
             ./modules/guests/headscale.nix
             ./modules/guests/caddy.nix
+            ./modules/crowdsec.nix
           ];
         };
       };
