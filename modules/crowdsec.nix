@@ -14,6 +14,7 @@
 {
   config,
   lib,
+  pkgs,
   ...
 }:
 
@@ -25,6 +26,14 @@ let
   # picks its default from, so our own ruleset (below) stays in step with
   # whichever backend the host actually uses.
   usingNftables = config.networking.nftables.enable;
+
+  # The same pkgs.formats.yaml{}.generate call upstream's own crowdsec.nix
+  # makes internally for services.crowdsec.settings.general — regenerated
+  # here (rather than read back from upstream, which keeps it as a
+  # private `let` binding, not a reachable option) purely to give raw
+  # `cscli` invocations a valid config at their conventional default path;
+  # see the comment below on crowdsec-firewall-bouncer-register.service.
+  crowdsecConfigFile = (pkgs.formats.yaml { }).generate "crowdsec.yaml" config.services.crowdsec.settings.general;
 in
 {
   options.qt1.infra.crowdsec = {
@@ -118,6 +127,26 @@ in
     # service.
     systemd.services.crowdsec-firewall-bouncer-register.serviceConfig.StateDirectory =
       lib.mkForce "crowdsec-firewall-bouncer-register";
+
+    # That same register unit's script also invokes the raw `cscli`
+    # binary directly — unlike every other cscli invocation here, which
+    # goes through services.crowdsec's own generated wrapper
+    # (environment.systemPackages) that always passes `-c=<the real
+    # config>`. Without it, cscli falls back to its conventional default,
+    # /etc/crowdsec/config.yaml, which NixOS's crowdsec module never
+    # actually writes there (the real config lives in the Nix store):
+    #   Error: while reading yaml file: open /etc/crowdsec/config.yaml: no such file or directory
+    #
+    # Fixed by symlinking that conventional path into place — but as an
+    # extra ExecStartPre on crowdsec.service itself (which already has
+    # /etc/crowdsec writable, and which the register unit is ordered
+    # after), not a separate systemd.tmpfiles rule: we just learned the
+    # hard way, fixing crowdsec.service's own StateDirectory above, that a
+    # brand new tmpfiles rule isn't guaranteed applied by the very switch
+    # that introduces it. This way there's nothing else to race.
+    systemd.services.crowdsec.serviceConfig.ExecStartPre = [
+      "${lib.getExe' pkgs.coreutils "ln"} -sf ${crowdsecConfigFile} /etc/crowdsec/config.yaml"
+    ];
 
     services.crowdsec-firewall-bouncer = {
       enable = true;
