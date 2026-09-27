@@ -138,6 +138,9 @@
       # what's reachable from the outside.
       server_url = serverUrl;
       dns = {
+        # The module's default already, pinned since the monitoring guest's
+        # Grafana is only served at its MagicDNS name (<node>.baseDomain).
+        magic_dns = true;
         base_domain = baseDomain;
         # MagicDNS clients use this as their sole resolver, so it must be
         # able to resolve the public internet too, not just the tailnet.

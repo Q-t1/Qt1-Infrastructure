@@ -3,11 +3,15 @@
 # three is independently useful here — they exist purely to back this one
 # Grafana instance.
 #
-# Reachable only over the tailnet: this guest joins it itself
-# (qt1.infra.tailscaleClient), and Grafana's port is opened only on the
-# tailscale0 interface below — never the guest bridge, never (transitively)
-# the WAN, the same way every other guest here stays off the WAN by simply
-# never appearing in the host's networking.nat.forwardPorts.
+# Reachable only over the tailnet, and only through its MagicDNS name
+# (http://monitoring.<baseDomain>/): this guest joins the tailnet itself
+# (qt1.infra.tailscaleClient) under a stable node name, Grafana listens on
+# loopback only, and an nginx in front of it — its port opened only on the
+# tailscale0 interface below, never the guest bridge, never (transitively)
+# the WAN — answers for that one hostname and drops every other Host
+# (tailnet IP, bare `monitoring`, anything else). Like every other guest here
+# it also stays off the WAN by simply never appearing in the host's
+# networking.nat.forwardPorts.
 #
 # Collection itself happens on the HOST, alongside crowdsec.nix
 # (../modules/guests/monitoring.nix): a host-side node_exporter this guest's
@@ -15,8 +19,8 @@
 # host journal into this guest's Loki. Nothing is collected from inside the
 # headscale/caddy guests in this pass.
 #
-# Called with its network coordinates, the tailnet it joins, and caddy's own
-# bridge address/hostname (for the NAT-hairpin shortcut below) by the
+# Called with its network coordinates, the tailnet it joins (login server and
+# MagicDNS base domain), and caddy's own bridge address/hostname (for the NAT-hairpin shortcut below) by the
 # host-side module; guests are evaluated by microvm.nix in a nested
 # nixosSystem that gets none of the host's specialArgs, so they are passed in
 # explicitly rather than read from the enclosing config.
@@ -26,6 +30,7 @@
   gateway,
   prefixLength,
   loginServerUrl,
+  baseDomain,
   caddyAddress,
   tlsHostname,
 }:
@@ -37,6 +42,11 @@ let
   prometheusPort = 9090;
   grafanaPort = 3000;
   nodeExporterPort = 9100;
+
+  # The tailnet node name this guest registers under, and so its MagicDNS
+  # name — the one URL Grafana is served at.
+  nodeName = "monitoring";
+  fqdn = "${nodeName}.${baseDomain}";
 in
 {
   imports = [ ../modules/tailscale-client.nix ];
@@ -53,6 +63,16 @@ in
       }
     ];
     volumes = [
+      {
+        # tailscaled's node key. Persisting it keeps this guest the same
+        # tailnet node — and so the same MagicDNS name — across restarts;
+        # on the tmpfs root alone every boot registered a fresh node, and
+        # while the previous one hadn't yet expired headscale handed the new
+        # one a suffixed name (monitoring-xxxxxxxx), breaking the URL.
+        image = "tailscale-state.img";
+        mountPoint = "/var/lib/tailscale";
+        size = 64;
+      }
       {
         image = "loki-data.img";
         mountPoint = "/var/lib/loki";
@@ -75,7 +95,7 @@ in
   boot.initrd.kernelModules = [ "qemu_fw_cfg" ];
 
   networking = {
-    hostName = "monitoring";
+    hostName = nodeName;
     useNetworkd = true;
     useDHCP = false;
     nameservers = [
@@ -97,11 +117,12 @@ in
       extraCommands = ''
         iptables -A nixos-fw -p tcp --dport ${toString lokiPort} -s ${gateway} -j nixos-fw-accept
       '';
-      # Grafana itself: tailnet-only, not bridge-reachable at all — this is
-      # the actual "reachable only from the headscale net" enforcement,
-      # alongside this guest never appearing in the host's
+      # nginx in front of Grafana: tailnet-only, not bridge-reachable at
+      # all — this is the actual "reachable only from the headscale net"
+      # enforcement, alongside this guest never appearing in the host's
       # networking.nat.forwardPorts (see modules/guests/monitoring.nix).
-      interfaces.tailscale0.allowedTCPPorts = [ grafanaPort ];
+      # Grafana's own port isn't opened anywhere: it listens on loopback.
+      interfaces.tailscale0.allowedTCPPorts = [ 80 ];
     };
   };
   systemd.network.networks."10-uplink" = {
@@ -114,9 +135,14 @@ in
     enable = true;
     inherit loginServerUrl;
     authKeyFile = "/run/credentials/tailscale-autoconnect.service/tailscale-authkey";
-    # tmpfs root — same reasoning as every other guest here: without this,
-    # every VM restart would register as a new tailnet node.
-    ephemeral = true;
+    # Not ephemeral: /var/lib/tailscale is a persistent volume above, so
+    # restarts reuse the same node instead of piling up new ones — and an
+    # ephemeral node would be deleted by headscale whenever the VM stays
+    # down past its inactivity timeout, losing the name with it.
+    ephemeral = false;
+    # Pinned explicitly rather than inherited from the OS hostname: this is
+    # the label MagicDNS serves, i.e. the URL below.
+    extraUpFlags = [ "--hostname=${nodeName}" ];
   };
   # tailscale-client.nix declares the credential path above but not the
   # import itself — mirrors sshd.serviceConfig.ImportCredential in
@@ -188,8 +214,15 @@ in
     enable = true;
     settings = {
       server = {
-        http_addr = "0.0.0.0";
+        # Loopback only: nginx below is the sole way in.
+        http_addr = "127.0.0.1";
         http_port = grafanaPort;
+        domain = fqdn;
+        root_url = "http://${fqdn}/";
+        # Redirects any request whose Host isn't the MagicDNS name back to
+        # it — a second layer behind nginx's own Host filtering (and DNS
+        # rebinding protection).
+        enforce_domain = true;
       };
       security = {
         # Both require the file provider in this nixpkgs version — a plain
@@ -222,6 +255,29 @@ in
     "grafana-admin-password"
     "grafana-secret-key"
   ];
+
+  # The only listener reachable from the tailnet (port 80 on tailscale0, see
+  # the firewall above). Plain HTTP: headscale can't issue certificates for
+  # MagicDNS names the way Tailscale's own `tailscale cert` does, and the
+  # tailnet (WireGuard) already encrypts the traffic end to end.
+  services.nginx = {
+    enable = true;
+    recommendedProxySettings = true;
+    virtualHosts = {
+      # Anything that didn't ask for the MagicDNS name — the node's tailnet
+      # IP, its short name, a made-up Host — gets the connection closed
+      # without a response.
+      "_" = {
+        default = true;
+        extraConfig = "return 444;";
+      };
+      ${fqdn}.locations."/" = {
+        proxyPass = "http://127.0.0.1:${toString grafanaPort}";
+        # Grafana Live (dashboard streaming) runs over websockets.
+        proxyWebsockets = true;
+      };
+    };
+  };
 
   system.stateVersion = "26.05";
 }

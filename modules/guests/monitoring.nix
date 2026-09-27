@@ -23,6 +23,17 @@ in
   options.qt1.infra.guests.monitoring = {
     enable = lib.mkEnableOption "the monitoring microVM (Loki + Prometheus + Grafana, reachable only over the tailnet)";
 
+    grafanaUrl = lib.mkOption {
+      type = lib.types.str;
+      default = "http://monitoring.${headscale.baseDomain}/";
+      readOnly = true;
+      description = ''
+        The one URL Grafana answers at: the guest's MagicDNS name on the
+        tailnet (qt1.infra.guests.headscale.baseDomain). Any other Host —
+        its tailnet IP included — is refused; see guests/monitoring.nix.
+      '';
+    };
+
     address = lib.mkOption {
       type = lib.types.str;
       default = "10.100.0.4";
@@ -81,6 +92,7 @@ in
           inherit (host) prefixLength;
           gateway = host.hostAddress;
           loginServerUrl = headscale.serverUrl;
+          inherit (headscale) baseDomain;
           caddyAddress = caddy.address;
           tlsHostname = headscale.tlsHostname;
         })

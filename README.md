@@ -300,15 +300,23 @@ not inside this guest:
 Both Loki and Prometheus default to 30 days' retention, sized against the
 guest's own volumes (`/var/lib/loki` 8G, `/var/lib/prometheus2` 4G).
 
-**Reachable only over the tailnet — this is the actual point of the guest.**
-Three things enforce that, stacked:
+**Reachable only over the tailnet, at its MagicDNS name only — this is the
+actual point of the guest.** Grafana is served at exactly one URL,
+`http://monitoring.<baseDomain>/` (`baseDomain` is
+`qt1.infra.guests.headscale.baseDomain`; also exposed read-only as
+`qt1.infra.guests.monitoring.grafanaUrl`). Four things enforce that, stacked:
 
 1. Like every other guest here, it never appears in the host's
    `networking.nat.forwardPorts` — structurally unreachable from the WAN.
-2. Grafana's port (3000) is opened only on the guest's own `tailscale0`
-   interface, not the bridge — so even another guest on `10.100.0.0/24`
-   can't reach it, only tailnet peers.
-3. Loki's push port (3100) is opened on the bridge, but source-restricted to
+2. Grafana itself listens on `127.0.0.1:3000` only. The one reachable
+   listener is an nginx on port 80, opened only on the guest's own
+   `tailscale0` interface, not the bridge — so even another guest on
+   `10.100.0.0/24` can't reach it, only tailnet peers.
+3. That nginx proxies only requests for `monitoring.<baseDomain>`; any other
+   `Host` (the node's `100.64.x.x` tailnet IP, the bare `monitoring` short
+   name, …) gets its connection closed (`444`). Grafana's own
+   `enforce_domain` backs that up behind it.
+4. Loki's push port (3100) is opened on the bridge, but source-restricted to
    the host's own address only (the same `iptables`-source-IP trick the
    headscale guest uses to scope its SSH) — nothing else on the bridge can
    reach it either.
@@ -320,18 +328,31 @@ tailnet" above) as its *only* route in, which is also why it needs
 (`networking.hosts` pointing headscale's hostname at caddy's bridge address)
 is baked into `guests/monitoring.nix` directly, not left as a manual step.
 
-Once tailnet-joined yourself, reach it at `http://monitoring.<baseDomain>:3000`
-(MagicDNS; `baseDomain` is `qt1.infra.guests.headscale.baseDomain`). Grafana's
-initial admin password is host-generated, unattended, the same pattern as
-every other secret in this repo:
+For that URL to stay valid the node's name has to be stable, so unlike a
+typical tmpfs-root guest it is **not** ephemeral: tailscaled's state lives on
+its own small persistent volume (`/var/lib/tailscale`) and it registers with
+an explicit `--hostname=monitoring`, so a restart reuses the same node (and
+name) instead of registering a new one. If headscale already knows another
+node called `monitoring` (e.g. a leftover from before this change), the new
+one gets a suffixed name — check and fix it on the headscale guest:
+
+```
+headscale nodes list
+headscale nodes rename -i <id> monitoring   # after deleting the stale one
+```
+
+Your own machine needs MagicDNS turned on to resolve the name (the default:
+`tailscale up` accepts the tailnet's DNS unless `--accept-dns=false`).
+Grafana's initial admin password is host-generated, unattended, the same
+pattern as every other secret in this repo:
 
 ```
 sudo cat /var/lib/microvms/monitoring/grafana-admin-password
 ```
 
 **Nothing here survives a from-scratch reinstall of the host** — same
-caveat as the headscale/caddy guests: `/var/lib/loki`, `/var/lib/prometheus2`
-and `/var/lib/grafana` are plain root-fs volume images, not backed by
+caveat as the headscale/caddy guests: `/var/lib/loki`, `/var/lib/prometheus2`,
+`/var/lib/grafana` and `/var/lib/tailscale` are plain root-fs volume images, not backed by
 anything else. Back them up before reinstalling if the history matters to
 you, or accept starting fresh.
 
