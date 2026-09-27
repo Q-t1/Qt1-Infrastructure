@@ -1,5 +1,6 @@
 # Host side of the monitoring guest: the VM entry, its two host-generated
-# Grafana secrets, and the host-side collection that actually feeds it
+# Grafana secrets, Grafana's vhost on caddy-internal, and the host-side
+# collection that actually feeds it
 # (node_exporter for metrics, Grafana Alloy for logs) — the guest itself only
 # holds the storage/UI (Loki, Prometheus, Grafana). See ../../guests/monitoring.nix
 # for the guest's own configuration and the reasoning behind bundling all
@@ -14,23 +15,34 @@
 let
   host = config.qt1.infra.microvmHost;
   headscale = config.qt1.infra.guests.headscale;
-  caddy = config.qt1.infra.guests.caddy;
+  caddyInternal = config.qt1.infra.guests.caddyInternal;
   cfg = config.qt1.infra.guests.monitoring;
 
   nodeExporterPort = 9100;
+  # Must match guests/monitoring.nix.
+  grafanaPort = 3000;
 in
 {
   options.qt1.infra.guests.monitoring = {
-    enable = lib.mkEnableOption "the monitoring microVM (Loki + Prometheus + Grafana, reachable only over the tailnet)";
+    enable = lib.mkEnableOption "the monitoring microVM (Loki + Prometheus + Grafana, reachable only over the tailnet, through caddy-internal)";
+
+    grafanaLabel = lib.mkOption {
+      type = lib.types.str;
+      default = "grafana";
+      description = ''
+        Grafana's vhost on caddy-internal, i.e. the first label of its
+        MagicDNS alias: `<grafanaLabel>.<baseDomain>`.
+      '';
+    };
 
     grafanaUrl = lib.mkOption {
       type = lib.types.str;
-      default = "http://monitoring.${headscale.baseDomain}/";
+      default = "http://${cfg.grafanaLabel}.${headscale.baseDomain}/";
       readOnly = true;
       description = ''
-        The one URL Grafana answers at: the guest's MagicDNS name on the
-        tailnet (qt1.infra.guests.headscale.baseDomain). Any other Host —
-        its tailnet IP included — is refused; see guests/monitoring.nix.
+        The one URL Grafana answers at, over the tailnet only: its MagicDNS
+        alias (qt1.infra.guests.headscale.baseDomain), served by
+        caddy-internal. See guests/monitoring.nix.
       '';
     };
 
@@ -76,12 +88,8 @@ in
         message = "qt1.infra.guests.monitoring requires qt1.infra.microvmHost.enable.";
       }
       {
-        assertion = headscale.enable;
-        message = "qt1.infra.guests.monitoring requires qt1.infra.guests.headscale.enable — this guest joins the tailnet it coordinates, unconditionally, as its only means of reachability.";
-      }
-      {
-        assertion = caddy.enable;
-        message = "qt1.infra.guests.monitoring requires qt1.infra.guests.caddy.enable — it needs caddy's bridge address for the NAT-hairpin shortcut its tailscale-autoconnect run uses (see guests/monitoring.nix).";
+        assertion = caddyInternal.enable;
+        message = "qt1.infra.guests.monitoring requires qt1.infra.guests.caddyInternal.enable — the tailnet-only proxy is Grafana's only way in.";
       }
     ];
 
@@ -91,10 +99,8 @@ in
           inherit (cfg) address mac;
           inherit (host) prefixLength;
           gateway = host.hostAddress;
-          loginServerUrl = headscale.serverUrl;
-          inherit (headscale) baseDomain;
-          caddyAddress = caddy.address;
-          tlsHostname = headscale.tlsHostname;
+          grafanaHostname = "${cfg.grafanaLabel}.${headscale.baseDomain}";
+          proxyAddress = caddyInternal.address;
         })
       ];
       # storeOnDisk defaults to true, which defaults systemSymlink to false —
@@ -102,11 +108,6 @@ in
       # function at all. Same reasoning as every other guest here.
       microvm.systemSymlink = true;
       microvm.credentialFiles = {
-        # The same shared, reusable pre-auth key every tailscaleClient
-        # consumer points at (see modules/guests/headscale.nix and the
-        # README's "Joining the tailnet" section) — not a secret of this
-        # guest's own.
-        tailscale-authkey = headscale.tailscaleAuthKeyFile;
         grafana-admin-password = cfg.adminPasswordFile;
         grafana-secret-key = cfg.secretKeyFile;
       };
@@ -143,6 +144,9 @@ in
         done
       '';
     };
+
+    qt1.infra.guests.caddyInternal.virtualHosts.${cfg.grafanaLabel} =
+      "${cfg.address}:${toString grafanaPort}";
 
     systemd.services."microvm@monitoring" = {
       wants = [ "monitoring-provision-secrets.service" ];

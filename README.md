@@ -18,6 +18,8 @@ modules/guests/headscale.nix     host-side VM declaration     (qt1.infra.guests.
 guests/headscale.nix             the guest's own NixOS config
 modules/guests/caddy.nix         host-side VM declaration     (qt1.infra.guests.caddy)
 guests/caddy.nix                 the guest's own NixOS config
+modules/guests/caddy-internal.nix host-side VM declaration    (qt1.infra.guests.caddyInternal)
+guests/caddy-internal.nix        the guest's own NixOS config
 modules/crowdsec.nix             host-side CrowdSec + bouncer (qt1.infra.crowdsec)
 modules/guests/monitoring.nix    host-side VM + collection    (qt1.infra.guests.monitoring)
 guests/monitoring.nix            the guest's own NixOS config
@@ -66,7 +68,8 @@ qt1.infra = {
     letsEncryptEmail = "you@example.com";
   };
   crowdsec.enable = true;   # optional: bans offenders against caddy's logs
-  guests.monitoring.enable = true;   # optional: Loki+Prometheus+Grafana, tailnet-only
+  guests.caddyInternal.enable = true;   # optional: tailnet-only proxy for internal apps
+  guests.monitoring.enable = true;   # optional: Loki+Prometheus+Grafana, behind caddyInternal
 };
 ```
 
@@ -267,6 +270,66 @@ setting `services.crowdsec.settings.capi.credentialsFile` yourself; it's
 left out here deliberately, since the upstream module's auto-registration
 script has a rough edge that can fail a restart after the first run.
 
+## caddy-internal guest (`qt1.infra.guests.caddyInternal`)
+
+Optional, off by default. The tailnet-only counterpart of the caddy guest
+above: one [Caddy](https://caddyserver.com) reverse proxy (`10.100.0.5`) in
+front of every *internal* app, each served at its own MagicDNS name,
+`http://<label>.<baseDomain>/`:
+
+```nix
+qt1.infra.guests.caddyInternal = {
+  enable = true;
+  # Guests register their own entry (monitoring adds `grafana`); add others
+  # by hand as `label = "upstream-host:port"`.
+  virtualHosts.myapp = "10.100.0.9:8080";
+};
+# -> http://myapp.<baseDomain>/, listed in qt1.infra.guests.caddyInternal.urls
+```
+
+Requires `guests.headscale` and `guests.caddy` (for the same NAT-hairpin
+shortcut described in "Joining the tailnet").
+
+It is kept separate from the WAN-facing caddy on purpose. That one is
+port-forwarded from the internet; this one never is. So no vhost mistake
+here can publish an internal app, and a compromise of the public proxy
+doesn't hand over a tailnet node.
+
+How it fits together:
+
+- **This guest is the tailnet node, the apps aren't.** It joins the tailnet
+  (`qt1.infra.tailscaleClient`, shared pre-auth key) as node
+  `caddy-internal` (`nodeName`), with its tailscaled state on a small
+  persistent volume (`/var/lib/tailscale`) and not ephemeral. A restart
+  therefore keeps the same node and the same tailnet addresses.
+- **Names**: for each vhost, headscale serves `<label>.<baseDomain>` as an
+  extra DNS record (A + AAAA) pointing at that node's tailnet addresses —
+  `qt1.infra.guests.headscale.magicDnsAliases`, which this module fills in.
+  Node addresses are assigned by headscale at registration, so they can't be
+  written at build time: `headscale-magicdns-aliases`, a one-minute timer
+  inside the headscale guest, looks them up with `headscale nodes list` and
+  rewrites `/var/lib/headscale/extra-records.json` (`dns.extra_records_path`)
+  when they change; headscale reloads that file by itself.
+- **Reachability**: Caddy listens on port 80, opened only on this guest's
+  `tailscale0`. It proxies only the declared hostnames; any other `Host`
+  (`caddy-internal.<baseDomain>`, the node's tailnet IP, …) gets its
+  connection closed. Upstreams are reached over the bridge, and each app's
+  guest opens its port to this guest's bridge address only.
+- **Plain HTTP**: headscale can't issue certificates for MagicDNS names
+  (there's no `tailscale cert` equivalent), and WireGuard already encrypts
+  the traffic end to end.
+
+Clients need MagicDNS on to resolve the names (the default: `tailscale up`
+accepts the tailnet's DNS unless `--accept-dns=false`). The node must
+register as exactly `caddy-internal`: if headscale already knows a node by
+that name, the new one gets a suffixed name and the aliases resolve to
+nothing. Check and fix it on the headscale guest:
+
+```
+headscale nodes list
+headscale nodes rename -i <id> caddy-internal   # after deleting the stale one
+```
+
 ## monitoring guest (`qt1.infra.guests.monitoring`)
 
 Optional, off by default. Bundles [Loki](https://grafana.com/oss/loki/),
@@ -279,7 +342,7 @@ this one Grafana instance:
 qt1.infra.guests.monitoring.enable = true;
 ```
 
-Requires both `guests.headscale` and `guests.caddy` (see below for why).
+Requires `guests.caddyInternal`, its only way in (see below).
 **Collection itself happens on the host**, alongside `qt1.infra.crowdsec`,
 not inside this guest:
 
@@ -300,49 +363,25 @@ not inside this guest:
 Both Loki and Prometheus default to 30 days' retention, sized against the
 guest's own volumes (`/var/lib/loki` 8G, `/var/lib/prometheus2` 4G).
 
-**Reachable only over the tailnet, at its MagicDNS name only — this is the
+**Reachable only over the tailnet, at its MagicDNS alias only — this is the
 actual point of the guest.** Grafana is served at exactly one URL,
-`http://monitoring.<baseDomain>/` (`baseDomain` is
-`qt1.infra.guests.headscale.baseDomain`; also exposed read-only as
-`qt1.infra.guests.monitoring.grafanaUrl`). Four things enforce that, stacked:
+`http://grafana.<baseDomain>/` (label: `grafanaLabel`; also exposed
+read-only as `qt1.infra.guests.monitoring.grafanaUrl`), through the
+caddy-internal guest above. This guest registers that vhost there itself and
+never joins the tailnet. Four things enforce it, stacked:
 
 1. Like every other guest here, it never appears in the host's
-   `networking.nat.forwardPorts` — structurally unreachable from the WAN.
-2. Grafana itself listens on `127.0.0.1:3000` only. The one reachable
-   listener is an nginx on port 80, opened only on the guest's own
-   `tailscale0` interface, not the bridge — so even another guest on
-   `10.100.0.0/24` can't reach it, only tailnet peers.
-3. That nginx proxies only requests for `monitoring.<baseDomain>`; any other
-   `Host` (the node's `100.64.x.x` tailnet IP, the bare `monitoring` short
-   name, …) gets its connection closed (`444`). Grafana's own
-   `enforce_domain` backs that up behind it.
+   `networking.nat.forwardPorts`, so it can't be reached from the WAN at all.
+2. Grafana's port (3000) is opened on the bridge for caddy-internal's
+   address only (the same `iptables`-source-IP trick the headscale guest
+   uses to scope its SSH). The host and the other guests can't reach it.
+3. caddy-internal itself is reachable only from tailnet peers, and only
+   proxies requests for `grafana.<baseDomain>`. Grafana's own
+   `enforce_domain` redirects any other `Host` back to that name.
 4. Loki's push port (3100) is opened on the bridge, but source-restricted to
-   the host's own address only (the same `iptables`-source-IP trick the
-   headscale guest uses to scope its SSH) — nothing else on the bridge can
-   reach it either.
+   the host's own address only — nothing else on the bridge can reach it
+   either.
 
-This guest joins the tailnet itself (`qt1.infra.tailscaleClient`, using the
-same shared pre-auth key every other consumer does — see "Joining the
-tailnet" above) as its *only* route in, which is also why it needs
-`guests.caddy`: the NAT-hairpin shortcut described there
-(`networking.hosts` pointing headscale's hostname at caddy's bridge address)
-is baked into `guests/monitoring.nix` directly, not left as a manual step.
-
-For that URL to stay valid the node's name has to be stable, so unlike a
-typical tmpfs-root guest it is **not** ephemeral: tailscaled's state lives on
-its own small persistent volume (`/var/lib/tailscale`) and it registers with
-an explicit `--hostname=monitoring`, so a restart reuses the same node (and
-name) instead of registering a new one. If headscale already knows another
-node called `monitoring` (e.g. a leftover from before this change), the new
-one gets a suffixed name — check and fix it on the headscale guest:
-
-```
-headscale nodes list
-headscale nodes rename -i <id> monitoring   # after deleting the stale one
-```
-
-Your own machine needs MagicDNS turned on to resolve the name (the default:
-`tailscale up` accepts the tailnet's DNS unless `--accept-dns=false`).
 Grafana's initial admin password is host-generated, unattended, the same
 pattern as every other secret in this repo:
 
@@ -351,8 +390,8 @@ sudo cat /var/lib/microvms/monitoring/grafana-admin-password
 ```
 
 **Nothing here survives a from-scratch reinstall of the host** — same
-caveat as the headscale/caddy guests: `/var/lib/loki`, `/var/lib/prometheus2`,
-`/var/lib/grafana` and `/var/lib/tailscale` are plain root-fs volume images, not backed by
+caveat as the headscale/caddy guests: `/var/lib/loki`, `/var/lib/prometheus2`
+and `/var/lib/grafana` are plain root-fs volume images, not backed by
 anything else. Back them up before reinstalling if the history matters to
 you, or accept starting fresh.
 

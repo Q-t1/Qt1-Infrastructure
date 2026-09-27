@@ -40,9 +40,22 @@
   baseDomain,
   internalPort,
   adminSshKeys,
+  magicDnsAliases,
 }:
 
-{ lib, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
+
+let
+  # Watched by headscale itself (dns.extra_records_path), which reloads it on
+  # every change — no restart needed when an alias's target moves.
+  extraRecordsFile = "/var/lib/headscale/extra-records.json";
+  hasAliases = magicDnsAliases != { };
+in
 
 {
   microvm = {
@@ -138,10 +151,11 @@
       # what's reachable from the outside.
       server_url = serverUrl;
       dns = {
-        # The module's default already, pinned since the monitoring guest's
-        # Grafana is only served at its MagicDNS name (<node>.baseDomain).
+        # The module's default already, pinned since caddy-internal's apps
+        # are only served at MagicDNS names (see magicDnsAliases below).
         magic_dns = true;
         base_domain = baseDomain;
+        extra_records_path = lib.mkIf hasAliases extraRecordsFile;
         # MagicDNS clients use this as their sole resolver, so it must be
         # able to resolve the public internet too, not just the tailnet.
         nameservers.global = [
@@ -149,6 +163,70 @@
           "8.8.8.8"
         ];
       };
+    };
+  };
+
+  # magicDnsAliases: publish each alias fqdn as A/AAAA records pointing at
+  # the named node's current tailnet addresses. headscale refuses to start
+  # if extra_records_path doesn't exist yet, so seed it empty first; after
+  # that, headscale-magicdns-aliases rewrites it (only when it changes)
+  # whenever it runs, and headscale picks the change up by itself.
+  systemd.services.headscale.serviceConfig.ExecStartPre = lib.mkIf hasAliases [
+    "${pkgs.writeShellScript "headscale-seed-extra-records" ''
+      [ -e ${extraRecordsFile} ] || echo '[]' > ${extraRecordsFile}
+    ''}"
+  ];
+  systemd.services.headscale-magicdns-aliases = lib.mkIf hasAliases {
+    description = "Point headscale's MagicDNS alias records at their nodes' current addresses";
+    after = [ "headscale.service" ];
+    requires = [ "headscale.service" ];
+    wantedBy = [ "multi-user.target" ];
+    path = [
+      config.services.headscale.package
+      pkgs.jq
+      pkgs.diffutils
+    ];
+    serviceConfig = {
+      Type = "oneshot";
+      # Same user as headscale: owns extraRecordsFile, and is in the group
+      # allowed on the CLI's unix socket.
+      User = config.services.headscale.user;
+      Group = config.services.headscale.group;
+      # Right after boot headscale's CLI socket may not be up yet.
+      Restart = "on-failure";
+      RestartSec = "10s";
+    };
+    script = ''
+      set -euo pipefail
+
+      new=$(mktemp)
+      trap 'rm -f "$new"' EXIT
+
+      # A node that isn't registered (yet) simply contributes no records.
+      headscale nodes list -o json \
+        | jq --argjson aliases ${lib.escapeShellArg (builtins.toJSON magicDnsAliases)} '
+            (. // []) as $nodes
+            | [ $aliases | to_entries[] as $a
+                | $nodes[] | select(.given_name == $a.value)
+                | .ip_addresses[]
+                | { name: $a.key, type: (if contains(":") then "AAAA" else "A" end), value: . } ]
+          ' > "$new"
+
+      # Rewritten in place (not renamed over) and only on change: headscale
+      # watches this exact file.
+      if ! cmp -s "$new" ${extraRecordsFile}; then
+        cat "$new" > ${extraRecordsFile}
+      fi
+    '';
+  };
+  # Addresses only change when a node re-registers; polling keeps that
+  # (and a node joining after headscale started) covered without a hook
+  # into headscale itself.
+  systemd.timers.headscale-magicdns-aliases = lib.mkIf hasAliases {
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnBootSec = "1min";
+      OnUnitActiveSec = "1min";
     };
   };
 

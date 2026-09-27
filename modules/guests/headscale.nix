@@ -80,6 +80,23 @@ in
       '';
     };
 
+    magicDnsAliases = lib.mkOption {
+      type = lib.types.attrsOf lib.types.str;
+      default = { };
+      example = {
+        "grafana.tailnet.example.com" = "caddy-internal";
+      };
+      description = ''
+        Extra MagicDNS names, as `fqdn = "node-name"`: each fqdn resolves,
+        for every tailnet client, to the current tailnet addresses of the
+        node with that name. Kept in sync inside the guest by
+        headscale-magicdns-aliases (see guests/headscale.nix), since node
+        addresses are assigned at registration, not known at build time.
+        Set by qt1.infra.guests.caddyInternal for its vhosts; rarely set by
+        hand.
+      '';
+    };
+
     adminSshKeys = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
@@ -163,6 +180,7 @@ in
             serverUrl
             baseDomain
             internalPort
+            magicDnsAliases
             ;
           inherit (host) prefixLength;
           gateway = host.hostAddress;
