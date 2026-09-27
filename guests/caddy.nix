@@ -17,15 +17,10 @@
 # guest: `journalctl -u microvm@caddy` on the host is the only way to see
 # them, since there's no other route in.
 #
-# Called with its network coordinates and the hostname/upstream it fronts
-# by the host-side module; guests are evaluated by microvm.nix in a nested
-# nixosSystem that gets none of the host's specialArgs, so they are passed
-# in explicitly rather than read from the enclosing config.
+# Built on ./base.nix; called with the hostname/upstream it fronts by the
+# host-side module, since guests are evaluated by microvm.nix in a nested
+# nixosSystem that gets none of the host's specialArgs.
 {
-  address,
-  mac,
-  gateway,
-  prefixLength,
   hostname,
   upstream,
   letsEncryptEmail,
@@ -35,16 +30,8 @@
 
 {
   microvm = {
-    hypervisor = "qemu";
     vcpu = 1;
     mem = 256;
-    interfaces = [
-      {
-        type = "tap";
-        id = "vm-caddy";
-        inherit mac;
-      }
-    ];
     volumes = [
       {
         image = "caddy-data.img";
@@ -54,25 +41,10 @@
     ];
   };
 
-  boot.initrd.kernelModules = [ "qemu_fw_cfg" ];
-
-  networking = {
-    useNetworkd = true;
-    useDHCP = false;
-    nameservers = [
-      "1.1.1.1"
-      "8.8.8.8"
-    ];
-    firewall.allowedTCPPorts = [
-      80 # ACME HTTP-01 challenge, and caddy's own http->https redirect
-      443
-    ];
-  };
-  systemd.network.networks."10-uplink" = {
-    matchConfig.MACAddress = mac;
-    address = [ "${address}/${toString prefixLength}" ];
-    gateway = [ gateway ];
-  };
+  networking.firewall.allowedTCPPorts = [
+    80 # ACME HTTP-01 challenge, and caddy's own http->https redirect
+    443
+  ];
 
   systemd.services.caddy.serviceConfig = {
     StandardOutput = "journal+console";
@@ -101,6 +73,4 @@
       log
     '';
   };
-
-  system.stateVersion = "26.05";
 }

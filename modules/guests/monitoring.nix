@@ -13,6 +13,7 @@
 }:
 
 let
+  infraLib = import ../../lib.nix { inherit lib; };
   host = config.qt1.infra.microvmHost;
   headscale = config.qt1.infra.guests.headscale;
   caddyInternal = config.qt1.infra.guests.caddyInternal;
@@ -23,165 +24,124 @@ let
   grafanaPort = 3000;
 in
 {
-  options.qt1.infra.guests.monitoring = {
-    enable = lib.mkEnableOption "the monitoring microVM (Loki + Prometheus + Grafana, reachable only over the tailnet, through caddy-internal)";
+  options.qt1.infra.guests.monitoring =
+    infraLib.guestOptions {
+      index = 4;
+      description = "the monitoring microVM (Loki + Prometheus + Grafana, reachable only over the tailnet, through caddy-internal)";
+    }
+    // {
+      grafanaLabel = lib.mkOption {
+        type = lib.types.str;
+        default = "grafana";
+        description = ''
+          Grafana's vhost on caddy-internal, i.e. the first label of its
+          MagicDNS alias: `<grafanaLabel>.<baseDomain>`.
+        '';
+      };
 
-    grafanaLabel = lib.mkOption {
-      type = lib.types.str;
-      default = "grafana";
-      description = ''
-        Grafana's vhost on caddy-internal, i.e. the first label of its
-        MagicDNS alias: `<grafanaLabel>.<baseDomain>`.
-      '';
+      grafanaUrl = lib.mkOption {
+        type = lib.types.str;
+        default = "http://${cfg.grafanaLabel}.${headscale.baseDomain}/";
+        readOnly = true;
+        description = ''
+          The one URL Grafana answers at, over the tailnet only: its MagicDNS
+          alias (qt1.infra.guests.headscale.baseDomain), served by
+          caddy-internal. See guests/monitoring.nix.
+        '';
+      };
+
+      adminPasswordFile = lib.mkOption {
+        type = lib.types.str;
+        default = "/var/lib/microvms/monitoring/grafana-admin-password";
+        description = ''
+          Host path holding Grafana's initial admin password, generated on the
+          host the first time this path doesn't exist (see
+          monitoring-provision-secrets, see ../../lib.nix). Read by qemu, which runs as the
+          `microvm` user, and passed into the guest as a systemd credential so
+          it never lands in the Nix store.
+        '';
+      };
+
+      secretKeyFile = lib.mkOption {
+        type = lib.types.str;
+        default = "/var/lib/microvms/monitoring/grafana-secret-key";
+        description = ''
+          Host path holding Grafana's secret_key (used to sign/encrypt
+          datasource secrets in its own database) — required by the upstream
+          module with no default, generated the same way as adminPasswordFile.
+        '';
+      };
     };
 
-    grafanaUrl = lib.mkOption {
-      type = lib.types.str;
-      default = "http://${cfg.grafanaLabel}.${headscale.baseDomain}/";
-      readOnly = true;
-      description = ''
-        The one URL Grafana answers at, over the tailnet only: its MagicDNS
-        alias (qt1.infra.guests.headscale.baseDomain), served by
-        caddy-internal. See guests/monitoring.nix.
-      '';
-    };
-
-    address = lib.mkOption {
-      type = lib.types.str;
-      default = "10.100.0.4";
-      description = "Address of the guest on the guest network.";
-    };
-
-    mac = lib.mkOption {
-      type = lib.types.str;
-      default = "02:00:00:00:00:04";
-      description = "MAC of the guest's tap interface; the guest matches on it.";
-    };
-
-    adminPasswordFile = lib.mkOption {
-      type = lib.types.str;
-      default = "/var/lib/microvms/monitoring/grafana-admin-password";
-      description = ''
-        Host path holding Grafana's initial admin password, generated on the
-        host the first time this path doesn't exist (see
-        monitoring-provision-secrets below). Read by qemu, which runs as the
-        `microvm` user, and passed into the guest as a systemd credential so
-        it never lands in the Nix store.
-      '';
-    };
-
-    secretKeyFile = lib.mkOption {
-      type = lib.types.str;
-      default = "/var/lib/microvms/monitoring/grafana-secret-key";
-      description = ''
-        Host path holding Grafana's secret_key (used to sign/encrypt
-        datasource secrets in its own database) — required by the upstream
-        module with no default, generated the same way as adminPasswordFile.
-      '';
-    };
-  };
-
-  config = lib.mkIf cfg.enable {
-    assertions = [
-      {
-        assertion = host.enable;
-        message = "qt1.infra.guests.monitoring requires qt1.infra.microvmHost.enable.";
-      }
-      {
-        assertion = caddyInternal.enable;
-        message = "qt1.infra.guests.monitoring requires qt1.infra.guests.caddyInternal.enable — the tailnet-only proxy is Grafana's only way in.";
-      }
-    ];
-
-    microvm.vms.monitoring.config = {
-      imports = [
-        (import ../../guests/monitoring.nix {
-          inherit (cfg) address mac;
-          inherit (host) prefixLength;
-          gateway = host.hostAddress;
+  config = lib.mkIf cfg.enable (
+    lib.mkMerge [
+      (infraLib.mkGuest config {
+        name = "monitoring";
+        inherit cfg;
+        module = import ../../guests/monitoring.nix {
           grafanaHostname = "${cfg.grafanaLabel}.${headscale.baseDomain}";
           proxyAddress = caddyInternal.address;
-        })
-      ];
-      # storeOnDisk defaults to true, which defaults systemSymlink to false —
-      # that drops share/microvm/system, which `microvm -l` requires to
-      # function at all. Same reasoning as every other guest here.
-      microvm.systemSymlink = true;
-      microvm.credentialFiles = {
-        grafana-admin-password = cfg.adminPasswordFile;
-        grafana-secret-key = cfg.secretKeyFile;
-      };
-    };
+        };
+        credentialFiles = {
+          grafana-admin-password = cfg.adminPasswordFile;
+          grafana-secret-key = cfg.secretKeyFile;
+        };
+      })
 
-    # Both secrets are host-generated, not human-provided — created before
-    # the VM starts instead of gating on a manual provisioning step.
-    # Idempotent: files that already exist are left alone, so rotating one is
-    # a matter of removing it by hand and restarting this service. Mirrors
-    # headscale-provision-secrets in modules/guests/headscale.nix exactly.
-    systemd.services.monitoring-provision-secrets = {
-      description = "Generate the monitoring guest's Grafana admin password and secret key";
-      before = [ "microvm@monitoring.service" ];
-      path = [
-        pkgs.openssl
-        pkgs.coreutils
-      ];
-      serviceConfig = {
-        Type = "oneshot";
-        RemainAfterExit = true;
-      };
-      script = ''
-        set -euo pipefail
+      (infraLib.provisionSecrets {
+        vm = "monitoring";
+        description = "Generate the monitoring guest's Grafana admin password and secret key";
+        path = [
+          pkgs.openssl
+          pkgs.coreutils
+        ];
+        secrets = lib.genAttrs [ cfg.adminPasswordFile cfg.secretKeyFile ] (_: ''
+          openssl rand -hex 32 > "$f"
+        '');
+      })
 
-        install -d -m 0755 "$(dirname ${lib.escapeShellArg cfg.adminPasswordFile})"
+      {
+        assertions = [
+          {
+            assertion = caddyInternal.enable;
+            message = "qt1.infra.guests.monitoring requires qt1.infra.guests.caddyInternal.enable — the tailnet-only proxy is Grafana's only way in.";
+          }
+        ];
 
-        for f in ${lib.escapeShellArg cfg.adminPasswordFile} ${lib.escapeShellArg cfg.secretKeyFile}; do
-          if [ ! -e "$f" ]; then
-            umask 0377
-            openssl rand -hex 32 > "$f"
-            chown microvm:kvm "$f"
-            chmod 0400 "$f"
-          fi
-        done
-      '';
-    };
+        qt1.infra.guests.caddyInternal.virtualHosts.${cfg.grafanaLabel} =
+          "${cfg.address}:${toString grafanaPort}";
 
-    qt1.infra.guests.caddyInternal.virtualHosts.${cfg.grafanaLabel} =
-      "${cfg.address}:${toString grafanaPort}";
+        # Host-side metrics collection: a plain node_exporter, bridge-bound only
+        # (never the uplink/WAN interface), scraped by Prometheus inside the
+        # monitoring guest.
+        services.prometheus.exporters.node = {
+          enable = true;
+          listenAddress = host.hostAddress;
+          port = nodeExporterPort;
+        };
+        networking.firewall.interfaces.${host.bridge}.allowedTCPPorts = [ nodeExporterPort ];
 
-    systemd.services."microvm@monitoring" = {
-      wants = [ "monitoring-provision-secrets.service" ];
-      after = [ "monitoring-provision-secrets.service" ];
-    };
+        # Host-side log collection: Grafana Alloy (services.promtail was removed
+        # upstream — EOL — this is its nixpkgs-blessed replacement) tails the
+        # whole host journal and pushes it to the monitoring guest's Loki. This
+        # is the same host journal crowdsec.nix already reads from (caddy's
+        # access log and crowdsec's own logs both land there); headscale's own
+        # application logs don't, since it never mirrors its console to the host
+        # journal the way caddy does — out of scope for this pass.
+        services.alloy.enable = true;
+        environment.etc."alloy/config.alloy".text = ''
+          loki.source.journal "host" {
+            labels     = { job = "host" }
+            forward_to = [loki.write.monitoring.receiver]
+          }
 
-    # Host-side metrics collection: a plain node_exporter, bridge-bound only
-    # (never the uplink/WAN interface), scraped by Prometheus inside the
-    # monitoring guest.
-    services.prometheus.exporters.node = {
-      enable = true;
-      listenAddress = host.hostAddress;
-      port = nodeExporterPort;
-    };
-    networking.firewall.interfaces.${host.bridge}.allowedTCPPorts = [ nodeExporterPort ];
-
-    # Host-side log collection: Grafana Alloy (services.promtail was removed
-    # upstream — EOL — this is its nixpkgs-blessed replacement) tails the
-    # whole host journal and pushes it to the monitoring guest's Loki. This
-    # is the same host journal crowdsec.nix already reads from (caddy's
-    # access log and crowdsec's own logs both land there); headscale's own
-    # application logs don't, since it never mirrors its console to the host
-    # journal the way caddy does — out of scope for this pass.
-    services.alloy.enable = true;
-    environment.etc."alloy/config.alloy".text = ''
-      loki.source.journal "host" {
-        labels     = { job = "host" }
-        forward_to = [loki.write.monitoring.receiver]
+          loki.write "monitoring" {
+            endpoint {
+              url = "http://${cfg.address}:3100/loki/api/v1/push"
+            }
+          }
+        '';
       }
-
-      loki.write "monitoring" {
-        endpoint {
-          url = "http://${cfg.address}:3100/loki/api/v1/push"
-        }
-      }
-    '';
-  };
+    ]
+  );
 }

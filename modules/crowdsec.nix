@@ -33,7 +33,9 @@ let
   # private `let` binding, not a reachable option) purely to give raw
   # `cscli` invocations a valid config at their conventional default path;
   # see the comment below on crowdsec-firewall-bouncer-register.service.
-  crowdsecConfigFile = (pkgs.formats.yaml { }).generate "crowdsec.yaml" config.services.crowdsec.settings.general;
+  crowdsecConfigFile =
+    (pkgs.formats.yaml { }).generate "crowdsec.yaml"
+      config.services.crowdsec.settings.general;
 in
 {
   options.qt1.infra.crowdsec = {

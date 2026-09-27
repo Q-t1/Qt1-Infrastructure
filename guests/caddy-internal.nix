@@ -8,8 +8,8 @@
 # app to the internet, and a compromise of the WAN-facing proxy doesn't hand
 # over a tailnet node.
 #
-# How the names resolve: this guest joins the tailnet under a fixed node name
-# (nodeName), and headscale serves every <label>.<baseDomain> as an extra
+# How the names resolve: this guest joins the tailnet as a stable node named
+# after the VM (qt1.guest.tailnet in ./base.nix), and headscale serves every <label>.<baseDomain> as an extra
 # DNS record pointing at this node's tailnet addresses — kept in sync by
 # headscale-magicdns-aliases inside the headscale guest (see
 # ./headscale.nix), since those addresses are assigned by headscale at
@@ -26,96 +26,25 @@
 # Tailscale's own `tailscale cert` does, and the tailnet (WireGuard) already
 # encrypts the traffic end to end.
 #
-# Called with its network coordinates, the tailnet it joins, the vhosts it
-# serves, and the public caddy's bridge address/hostname (for the NAT-hairpin
-# shortcut below) by the host-side module; guests are evaluated by
-# microvm.nix in a nested nixosSystem that gets none of the host's
-# specialArgs, so they are passed in explicitly rather than read from the
-# enclosing config.
+# Built on ./base.nix; called with the vhosts it serves by the host-side
+# module, since guests are evaluated by microvm.nix in a nested nixosSystem
+# that gets none of the host's specialArgs.
 {
-  address,
-  mac,
-  gateway,
-  prefixLength,
-  loginServerUrl,
-  nodeName,
   baseDomain,
   virtualHosts,
-  caddyAddress,
-  tlsHostname,
 }:
 
 { lib, ... }:
 
 {
-  imports = [ ../modules/tailscale-client.nix ];
-
   microvm = {
-    # credentialFiles is only implemented by the qemu runner.
-    hypervisor = "qemu";
     vcpu = 1;
     mem = 256;
-    interfaces = [
-      {
-        type = "tap";
-        # Interface names are capped at 15 characters.
-        id = "vm-caddy-int";
-        inherit mac;
-      }
-    ];
-    volumes = [
-      {
-        # tailscaled's node key. Persisting it keeps this guest the same
-        # tailnet node — same name, same addresses — across restarts, which
-        # is what every alias record headscale serves for it points at.
-        image = "tailscale-state.img";
-        mountPoint = "/var/lib/tailscale";
-        size = 64;
-      }
-    ];
   };
+  # "vm-caddy-internal" would exceed the 15-character interface name limit.
+  qt1.guest.tapId = "vm-caddy-int";
 
-  boot.initrd.kernelModules = [ "qemu_fw_cfg" ];
-
-  networking = {
-    hostName = nodeName;
-    useNetworkd = true;
-    useDHCP = false;
-    nameservers = [
-      "1.1.1.1"
-      "8.8.8.8"
-    ];
-    # See the README's "Joining the tailnet" section: this resolves
-    # headscale's public hostname straight to the public caddy's bridge
-    # address instead of round-tripping out through the WAN and back in via
-    # the router's NAT (hairpinning, which not every router supports), for
-    # this guest's own tailscale-autoconnect run below.
-    hosts.${caddyAddress} = [ tlsHostname ];
-    firewall.interfaces.tailscale0.allowedTCPPorts = [ 80 ];
-  };
-  systemd.network.networks."10-uplink" = {
-    matchConfig.MACAddress = mac;
-    address = [ "${address}/${toString prefixLength}" ];
-    gateway = [ gateway ];
-  };
-
-  qt1.infra.tailscaleClient = {
-    enable = true;
-    inherit loginServerUrl;
-    authKeyFile = "/run/credentials/tailscale-autoconnect.service/tailscale-authkey";
-    # Not ephemeral: /var/lib/tailscale is a persistent volume above, so
-    # restarts reuse the same node — an ephemeral one would be deleted by
-    # headscale whenever the VM stays down past its inactivity timeout,
-    # taking its addresses (and so every alias record) with it.
-    ephemeral = false;
-    # Pinned explicitly rather than inherited from the OS hostname: this is
-    # the node name headscale-magicdns-aliases looks up.
-    extraUpFlags = [ "--hostname=${nodeName}" ];
-  };
-  # tailscale-client.nix declares the credential path above but not the
-  # import itself — importing the fw_cfg credential this guest's own host
-  # module hands in via microvm.credentialFiles.tailscale-authkey.
-  systemd.services.tailscale-autoconnect.serviceConfig.ImportCredential = [ "tailscale-authkey" ];
+  networking.firewall.interfaces.tailscale0.allowedTCPPorts = [ 80 ];
 
   services.caddy = {
     enable = true;
@@ -144,6 +73,4 @@
       }
     '';
   };
-
-  system.stateVersion = "26.05";
 }

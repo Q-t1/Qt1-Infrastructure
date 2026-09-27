@@ -17,21 +17,16 @@
 # host journal into this guest's Loki. Nothing is collected from inside the
 # headscale/caddy guests in this pass.
 #
-# Called with its network coordinates, the hostname Grafana is served at,
-# and caddy-internal's bridge address by the host-side module; guests are
+# Built on ./base.nix; called with the hostname Grafana is served at and
+# caddy-internal's bridge address by the host-side module, since guests are
 # evaluated by microvm.nix in a nested nixosSystem that gets none of the
-# host's specialArgs, so they are passed in explicitly rather than read from
-# the enclosing config.
+# host's specialArgs.
 {
-  address,
-  mac,
-  gateway,
-  prefixLength,
   grafanaHostname,
   proxyAddress,
 }:
 
-{ lib, ... }:
+{ config, ... }:
 
 let
   lokiPort = 3100;
@@ -42,16 +37,8 @@ in
 {
 
   microvm = {
-    hypervisor = "qemu";
     vcpu = 2;
     mem = 1536;
-    interfaces = [
-      {
-        type = "tap";
-        id = "vm-monitoring";
-        inherit mac;
-      }
-    ];
     volumes = [
       {
         image = "loki-data.img";
@@ -72,38 +59,22 @@ in
     ];
   };
 
-  boot.initrd.kernelModules = [ "qemu_fw_cfg" ];
-
-  networking = {
-    hostName = "monitoring";
-    useNetworkd = true;
-    useDHCP = false;
-    nameservers = [
-      "1.1.1.1"
-      "8.8.8.8"
-    ];
-    firewall = {
-      # Loki's push API: bridge-reachable, but only from the host itself
-      # (the only Promtail-equivalent, Grafana Alloy, runs there) — not from
-      # other guests on the bridge. extraCommands runs before the firewall's
-      # default-drop rule, the same trick guests/headscale.nix uses to scope
-      # its own SSH to the host only.
-      #
-      # Grafana: the same trick, scoped to caddy-internal — its only way in,
-      # and the actual "reachable only from the headscale net" enforcement,
-      # alongside this guest never appearing in the host's
-      # networking.nat.forwardPorts (see modules/guests/monitoring.nix).
-      extraCommands = ''
-        iptables -A nixos-fw -p tcp --dport ${toString lokiPort} -s ${gateway} -j nixos-fw-accept
-        iptables -A nixos-fw -p tcp --dport ${toString grafanaPort} -s ${proxyAddress} -j nixos-fw-accept
-      '';
-    };
-  };
-  systemd.network.networks."10-uplink" = {
-    matchConfig.MACAddress = mac;
-    address = [ "${address}/${toString prefixLength}" ];
-    gateway = [ gateway ];
-  };
+  qt1.guest.allowedTCPPortsFrom = [
+    # Loki's push API: only from the host itself (the only
+    # Promtail-equivalent, Grafana Alloy, runs there) — not from other
+    # guests on the bridge.
+    {
+      port = lokiPort;
+      from = config.qt1.guest.gateway;
+    }
+    # Grafana: only from caddy-internal — its one way in, and the actual
+    # "reachable only from the headscale net" enforcement, alongside this
+    # guest never appearing in the host's networking.nat.forwardPorts.
+    {
+      port = grafanaPort;
+      from = proxyAddress;
+    }
+  ];
 
   services.loki = {
     enable = true;
@@ -157,7 +128,7 @@ in
         job_name = "node";
         static_configs = [
           {
-            targets = [ "${gateway}:${toString nodeExporterPort}" ];
+            targets = [ "${config.qt1.guest.gateway}:${toString nodeExporterPort}" ];
             labels.instance = "host";
           }
         ];
@@ -210,6 +181,4 @@ in
     "grafana-admin-password"
     "grafana-secret-key"
   ];
-
-  system.stateVersion = "26.05";
 }

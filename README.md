@@ -12,8 +12,10 @@ inputs and builds on its own, and devSystem consumes it as a flake input.
 
 ```
 flake.nix                        nixosModules.default, standalone test host, checks
+lib.nix                          helpers for the host-side guest modules
 modules/microvm-host.nix         guest bridge + NAT           (qt1.infra.microvmHost)
 modules/tailscale-client.nix     join the tailnet             (qt1.infra.tailscaleClient)
+guests/base.nix                  what every guest shares      (qt1.guest)
 modules/guests/headscale.nix     host-side VM declaration     (qt1.infra.guests.headscale)
 guests/headscale.nix             the guest's own NixOS config
 modules/guests/caddy.nix         host-side VM declaration     (qt1.infra.guests.caddy)
@@ -176,35 +178,30 @@ re-register against a fresh instance.
 ## Joining the tailnet (`qt1.infra.tailscaleClient`)
 
 Any machine — the bare host or a guest — can join the tailnet this repo's own
-headscale coordinates, via `qt1.infra.tailscaleClient`:
+headscale coordinates, via `qt1.infra.tailscaleClient`. **On the host running
+the headscale/caddy guests, enabling it is all it takes:**
 
 ```nix
-qt1.infra.tailscaleClient = {
-  enable = true;
-  loginServerUrl = config.qt1.infra.guests.headscale.serverUrl;
-  authKeyFile = config.qt1.infra.guests.headscale.tailscaleAuthKeyFile;
-  # ephemeral = true;   # set for machines with non-persistent state
-};
+qt1.infra.tailscaleClient.enable = true;
 ```
 
-**For anything already on the guest bridge — the host, or another guest —
-also add a `networking.hosts` entry pointing `serverUrl`'s hostname at the
-*caddy* guest's own bridge address** (caddy holds the TLS certificate now,
-not headscale — see the caddy guest section above):
+Its settings default to those guests' own values:
 
-```nix
-networking.hosts.${config.qt1.infra.guests.caddy.address} = [
-  config.qt1.infra.guests.headscale.tlsHostname
-];
-```
+- `loginServerUrl`: headscale's `serverUrl`.
+- `authKeyFile`: the shared pre-auth key (see below).
+- `loginServerAddress`: the **caddy** guest's bridge address. `serverUrl`'s
+  hostname is resolved to it via `networking.hosts`, so the host reaches
+  headscale straight over the bridge instead of out through the WAN and back
+  in via the router's port forward (NAT hairpinning, which not every router
+  supports reliably). The TLS handshake still validates, since caddy's
+  certificate is for the hostname, not the IP.
 
-This resolves the same public hostname straight to the bridge instead of out
-through the WAN and back in via the router's port forward (NAT hairpinning,
-which not every router supports reliably) — the TLS handshake still
-validates correctly, since the certificate is for the hostname, not whichever
-IP you actually connected to. Skip this for a genuinely external Tailscale
-client (a phone, a laptop away from home); it has no bridge to shortcut
-through and just uses `serverUrl` over the WAN normally.
+A guest joins with `tailnet = true` in its `mkGuest` call (see "Adding a
+guest"), which sets all of the above inside the guest. It also gives the
+guest a stable node: named after the VM, not ephemeral, with tailscaled's
+state on a persistent volume. A genuinely external Tailscale client (a
+phone, a laptop away from home) has no bridge to shortcut through and just
+uses `serverUrl` over the WAN.
 
 **No manual step here, unlike the guest's own secrets above — including the
 pre-auth key itself.** Minting one normally requires headscale already
@@ -298,10 +295,10 @@ doesn't hand over a tailnet node.
 How it fits together:
 
 - **This guest is the tailnet node, the apps aren't.** It joins the tailnet
-  (`qt1.infra.tailscaleClient`, shared pre-auth key) as node
-  `caddy-internal` (`nodeName`), with its tailscaled state on a small
-  persistent volume (`/var/lib/tailscale`) and not ephemeral. A restart
-  therefore keeps the same node and the same tailnet addresses.
+  as node `caddy-internal` (`tailnet = true`, see "Joining the tailnet"),
+  with its tailscaled state on a small persistent volume
+  (`/var/lib/tailscale`) and not ephemeral. A restart therefore keeps the
+  same node and the same tailnet addresses.
 - **Names**: for each vhost, headscale serves `<label>.<baseDomain>` as an
   extra DNS record (A + AAAA) pointing at that node's tailnet addresses —
   `qt1.infra.guests.headscale.magicDnsAliases`, which this module fills in.
@@ -397,11 +394,28 @@ you, or accept starting fresh.
 
 ## Adding a guest
 
-1. `guests/<name>.nix` — the guest's NixOS config, as a function of its network
-   coordinates (see `guests/headscale.nix`). microvm.nix evaluates guests in
-   a nested `nixosSystem` that receives none of the host's specialArgs, so pass
-   anything it needs explicitly.
-2. `modules/guests/<name>.nix` — `qt1.infra.guests.<name>` options and the
-   `microvm.vms.<name>` declaration.
-3. Add it to `nixosModules.microvmHost`'s imports in `flake.nix`, give it an
-   address and a MAC, and enable it in `checks/test-host.nix`.
+Every guest is built from the same pieces, so a new one is mostly its own
+service config:
+
+1. `guests/<name>.nix` — the guest's own NixOS module, a function of only
+   what's specific to it (see `guests/caddy-internal.nix`). The common base
+   (`guests/base.nix`) is imported for it: qemu microVM, tap interface
+   `vm-<name>`, static address on the bridge via networkd, fw_cfg
+   credentials, public resolvers, `system.stateVersion`. Its network
+   coordinates are under `config.qt1.guest`, and
+   `qt1.guest.allowedTCPPortsFrom = [ { port; from; } ]` opens a port to a
+   single bridge address. microvm.nix evaluates guests in a nested
+   `nixosSystem` that receives none of the host's specialArgs, so anything
+   else it needs is passed in explicitly.
+2. `modules/guests/<name>.nix` — the host side, using `lib.nix`:
+   - `options.qt1.infra.guests.<name> = infraLib.guestOptions { index; description; } // { … }`
+     gives `enable`, plus `address` (`10.100.0.<index>`) and `mac`.
+   - `infraLib.mkGuest config { name; cfg; module; credentialFiles; tailnet; }`
+     declares `microvm.vms.<name>` with the base module and the host
+     assertions. `tailnet = true` joins the tailnet (see "Joining the
+     tailnet").
+   - `infraLib.provisionSecrets { vm; description; path; secrets; }` creates
+     host-generated secrets before the VM starts.
+   - A web UI goes on caddy-internal: `qt1.infra.guests.caddyInternal.virtualHosts.<label> = "<address>:<port>"`.
+3. Add it to `nixosModules.microvmHost`'s imports in `flake.nix` and enable
+   it in `checks/test-host.nix`.
