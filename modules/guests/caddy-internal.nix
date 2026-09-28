@@ -6,6 +6,7 @@
 let
   infraLib = import ../../lib.nix { inherit lib; };
   headscale = config.qt1.infra.guests.headscale;
+  monitoring = config.qt1.infra.guests.monitoring;
   cfg = config.qt1.infra.guests.caddyInternal;
 
   # VM name, and so its tailnet node name (qt1.guest.tailnet in
@@ -54,6 +55,35 @@ in
           ../../guests/caddy-internal.nix.
         '';
       };
+
+      metricsFromMonitoring = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Serve this caddy's Prometheus metrics — request rates and latency
+          histograms per vhost and status code, in-flight requests, its own
+          Go/process counters — on the guest bridge, for the monitoring guest
+          only. Off by default: with it off caddy collects no HTTP metrics at
+          all and opens no extra listener.
+
+          Turned on by qt1.infra.guests.monitoring (see its caddyMetrics
+          option), which is also what scrapes the endpoint. It carries no
+          authentication of its own, so it is opened to that one guest's
+          address only, never to the rest of the bridge and never to the WAN.
+        '';
+      };
+
+      metricsPort = lib.mkOption {
+        type = lib.types.port;
+        default = 2020;
+        readOnly = true;
+        description = ''
+          Port the metrics endpoint listens on when metricsFromMonitoring is
+          set, on this guest's bridge address only. Deliberately not 2019:
+          that is caddy's admin API, which can rewrite caddy's whole
+          configuration and stays on the guest's loopback.
+        '';
+      };
     };
 
   config = lib.mkIf cfg.enable (
@@ -63,6 +93,13 @@ in
         module = import ../../guests/caddy-internal.nix {
           inherit (cfg) virtualHosts;
           inherit (headscale) baseDomain;
+          # A plain conditional, not lib.mkIf: this is a function argument to
+          # the guest module, not an option definition — an mkIf here would
+          # arrive as an attrset the guest cannot read.
+          metrics = lib.optionalAttrs cfg.metricsFromMonitoring {
+            port = cfg.metricsPort;
+            from = monitoring.address;
+          };
         };
         tailnet = true;
       })

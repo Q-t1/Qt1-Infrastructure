@@ -43,12 +43,21 @@
 # APIs — rather than new confidentiality. The bridge hop from here to each
 # app's own guest stays plaintext either way.
 #
+# Its Prometheus metrics (per-vhost request rates, latency histograms,
+# in-flight requests) are served on the guest bridge for the monitoring guest
+# only, and only when it asks for them — see the `metrics` argument below and
+# qt1.infra.guests.caddyInternal.metricsFromMonitoring.
+#
 # Built on ./base.nix; called with the vhosts it serves by the host-side
 # module, since guests are evaluated by microvm.nix in a nested nixosSystem
 # that gets none of the host's specialArgs.
 {
   baseDomain,
   virtualHosts,
+  # `{ port = <n>; from = "<address>"; }` when the monitoring guest scrapes
+  # this one (qt1.infra.guests.caddyInternal.metricsFromMonitoring), `{ }`
+  # otherwise: it gates the whole metrics listener below, collection included.
+  metrics ? { },
 }:
 
 { config, lib, ... }:
@@ -87,6 +96,14 @@ in
     443
   ];
 
+  # The metrics endpoint below is the one thing here reachable over the guest
+  # bridge rather than the tailnet — from the monitoring guest's address only,
+  # nothing else on the bridge, and never from the WAN (this guest has no
+  # forwardPorts entry at all).
+  qt1.guest.allowedTCPPortsFrom = lib.optional (metrics != { }) {
+    inherit (metrics) port from;
+  };
+
   services.caddy = {
     enable = true;
     # Issue every certificate from caddy's own local CA instead of an ACME
@@ -94,8 +111,21 @@ in
     # never port-forwarded from the WAN (no HTTP-01/TLS-ALPN-01) and
     # headscale can't drive DNS-01 for these names (see the header) — so
     # this also guarantees no site ever stalls retrying public issuance.
+    #
+    # The global `metrics` option beside it is what actually turns HTTP metrics
+    # collection on — without it caddy 2.11 leaves them unregistered and the
+    # endpoint added further down serves only Go/process metrics. `per_host`
+    # adds the vhost as a label, which is the whole point here: one proxy,
+    # every internal app behind it. Caddy only labels hosts it has an explicit
+    # matcher for and buckets the rest under `_other`, so the label
+    # cardinality is bounded by virtualHosts.
     globalConfig = ''
       local_certs
+    ''
+    + lib.optionalString (metrics != { }) ''
+      metrics {
+        per_host
+      }
     '';
     virtualHosts = lib.mapAttrs' (
       label: upstream:
@@ -150,6 +180,21 @@ in
 
       http:// {
         abort
+      }
+    ''
+    # The metrics endpoint, on a port of its own. Caddy already serves
+    # /metrics on its admin API, but that API can also rewrite caddy's whole
+    # configuration, so it stays on this guest's loopback where upstream put
+    # it: this site exposes the metrics and nothing else. Plain http:// with
+    # an explicit port, so neither automatic HTTPS (no certificate for a
+    # bridge address) nor the catch-all above (it only listens on :80)
+    # applies to it. The bridge address here is a Host matcher rather than a
+    # bind address — caddy listens on :<port> on every interface, tailscale0
+    # included — so it is the firewall rule above, not this line, that keeps
+    # the endpoint to its one caller.
+    + lib.optionalString (metrics != { }) ''
+      http://${config.qt1.guest.address}:${toString metrics.port} {
+        metrics
       }
     '';
   };

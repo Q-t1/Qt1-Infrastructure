@@ -253,10 +253,14 @@ built in rather than left as setup steps:
   (iptables) or hooks both `input` and `forward` itself (nftables, if
   `networking.nftables.enable`).
 
-`collections` (default `[ "crowdsecurity/caddy" ]`) is the only knob this
+`collections` (default `[ "crowdsecurity/caddy" ]`) is the main knob this
 module exposes — add to it only alongside a matching acquisition of your
 own (`services.crowdsec.localConfig.acquisitions`), since a collection with
-nothing feeding it never sees an event. Everything else — the local API,
+nothing feeding it never sees an event. The other one is
+`metricsFromGuests`, which moves CrowdSec's own (already enabled) Prometheus
+endpoint off loopback and onto the guest bridge so the monitoring guest can
+scrape it; the monitoring guest sets it for you (see `crowdsecMetrics`
+below), and there is no reason to set it by hand. Everything else — the local API,
 registering the bouncer, minting its API key — is unattended, the same
 pattern as headscale's own secrets above: `cscli bouncers add` runs
 automatically the first time, idempotent after that.
@@ -384,22 +388,45 @@ qt1.infra.guests.monitoring.enable = true;
 ```
 
 Requires `guests.caddyInternal`, its only way in (see below).
-**Collection itself happens on the host**, alongside `qt1.infra.crowdsec`,
-not inside this guest:
+**Collection happens outside this guest**, mostly on the host alongside
+`qt1.infra.crowdsec` — the guest itself only stores and draws:
 
 - **Metrics**: a plain `node_exporter` on the host, bridge-bound only
   (`10.100.0.1:9100`, never the WAN-facing uplink), scraped by Prometheus
-  inside the guest. Host-only for now — the `headscale`/`caddy` guests don't
-  run their own exporters, so you get whole-box resource metrics (which
-  covers every guest from the outside) but not per-guest internals.
+  inside the guest. Whole-box resource metrics, which covers every guest from
+  the outside; the only per-guest internals collected are the two caddies'
+  HTTP metrics below, and the `headscale` guest runs no exporter of its own.
 - **Logs**: [Grafana Alloy](https://grafana.com/docs/alloy/) on the host
-  tails the whole host journal and pushes it to this guest's Loki.
+  tails the whole host journal and pushes it to this guest's Loki, keeping
+  each entry's systemd unit as a `unit` label (so a query can ask for one
+  service's lines instead of the whole box).
   `services.promtail` was removed upstream (end of life) — Alloy is its
   nixpkgs-blessed replacement. This is the same host journal
   `qt1.infra.crowdsec` already reads from: caddy's access log and
   crowdsec's own logs both land there and ship to Loki too. headscale's own
   application logs don't (it never mirrors its console to the host journal
   the way caddy does) — out of scope for now.
+- **caddy's HTTP metrics** (`caddyMetrics`, on by default): request rate and
+  latency per vhost, status code and method, in-flight requests, and each
+  proxy's own memory/CPU/goroutines, from both caddy guests — with the
+  "Caddy / Overview" dashboard (`guests/dashboards/caddy/`) over them. This
+  is the one thing collected from *inside* a guest: no host-side exporter
+  can see the requests a proxy inside a VM handled. Each caddy turns on
+  caddy's global `metrics` option (HTTP metrics are off until something
+  does) and serves `/metrics` on its bridge address, on port 2020, opened to
+  the monitoring guest's address alone — not caddy's admin API, which can
+  rewrite caddy's whole config and stays on the guest's loopback. Set
+  `caddyMetrics = false` to collect none of it.
+- **CrowdSec's metrics** (`crowdsecMetrics`, on by default whenever
+  `qt1.infra.crowdsec` is enabled): active decisions (bans) by scenario and
+  origin, alerts, bucket overflows, what the parsers accept and reject, and
+  the local API's own traffic per bouncer — with the "CrowdSec / Overview"
+  dashboard (`guests/dashboards/crowdsec/`) over them. CrowdSec already
+  exposes all of this on `127.0.0.1:6060`; the only thing this turns on is
+  serving it where the monitoring guest can reach it
+  (`qt1.infra.crowdsec.metricsFromGuests`, set for you), with port 6060
+  opened on the bridge interface alone — the endpoint has no authentication
+  of its own, and the host's firewall default-drops it everywhere else.
 - **headscale's tailnet inventory** (`headscaleMetrics`, on by default
   whenever `guests.headscale` is enabled): nodes and whether they're online,
   users, pre-auth keys, API keys, advertised vs. approved routes, and every
@@ -429,6 +456,16 @@ not inside this guest:
 
   Set `qt1.infra.guests.monitoring.headscaleMetrics = false` to skip all
   three, including the gRPC listener.
+
+Dashboards live in `guests/dashboards/<topic>/` and are provisioned per
+topic, so each one appears only when whatever feeds it is actually being
+collected. The headscale one is vendored from grafana.com; the caddy and
+crowdsec ones are written for this repo, against the labels the scrape jobs
+attach (`instance` is the guest's name) and the `unit` label on journal logs
+— each ends in a log panel reading the matching service's lines out of Loki,
+so a spike in the graphs and the lines behind it are on the same page.
+Provisioned dashboards are read-only in the UI: "Save as" a copy to change
+one.
 
 Both Loki and Prometheus default to 30 days' retention, sized against the
 guest's own volumes (`/var/lib/loki` 8G, `/var/lib/prometheus2` 4G).

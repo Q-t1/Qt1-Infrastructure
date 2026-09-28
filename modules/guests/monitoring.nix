@@ -1,10 +1,15 @@
 # Host side of the monitoring guest: the VM entry, its two host-generated
-# Grafana secrets, Grafana's vhost on caddy-internal, and the host-side
-# collection that actually feeds it
-# (node_exporter for metrics, Grafana Alloy for logs) — the guest itself only
-# holds the storage/UI (Loki, Prometheus, Grafana). See ../../guests/monitoring.nix
-# for the guest's own configuration and the reasoning behind bundling all
-# three into one guest.
+# Grafana secrets, Grafana's vhost on caddy-internal, and the collection that
+# actually feeds it (node_exporter for metrics, Grafana Alloy for logs, the
+# host's own CrowdSec metrics, and the scrape targets for the two caddy
+# guests' HTTP metrics) — the guest itself only holds the storage/UI (Loki,
+# Prometheus, Grafana). See ../../guests/monitoring.nix for the guest's own
+# configuration and the reasoning behind bundling all three into one guest.
+#
+# Which of the three optional collections are on is decided here, by
+# headscaleMetrics / caddyMetrics / crowdsecMetrics: each one both switches on
+# whatever serves the data (a host exporter, a listener inside a caddy guest,
+# CrowdSec's own endpoint) and gates the dashboard that reads it.
 {
   config,
   lib,
@@ -16,8 +21,23 @@ let
   infraLib = import ../../lib.nix { inherit lib; };
   host = config.qt1.infra.microvmHost;
   headscale = config.qt1.infra.guests.headscale;
+  caddy = config.qt1.infra.guests.caddy;
   caddyInternal = config.qt1.infra.guests.caddyInternal;
+  crowdsec = config.qt1.infra.crowdsec;
   cfg = config.qt1.infra.guests.monitoring;
+
+  # Both proxies, when they're enabled and serving metrics: each one's own
+  # bridge address and metrics port, labelled with the guest's name. See
+  # caddyMetrics.
+  caddyExporters =
+    lib.optional (cfg.caddyMetrics && caddy.enable) {
+      instance = "caddy";
+      target = "${caddy.address}:${toString caddy.metricsPort}";
+    }
+    ++ lib.optional (cfg.caddyMetrics && caddyInternal.enable) {
+      instance = "caddy-internal";
+      target = "${caddyInternal.address}:${toString caddyInternal.metricsPort}";
+    };
 
   nodeExporterPort = 9100;
   # prometheus-tailscale-exporter's own default port.
@@ -85,6 +105,42 @@ in
         '';
       };
 
+      caddyMetrics = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = ''
+          Collect both caddy guests' own HTTP metrics — request rate and
+          latency per vhost and status code, in-flight requests, TLS/process
+          counters — into Prometheus, and provision the "Caddy / Overview"
+          dashboard that reads them.
+
+          This is the one thing collected from inside the guests rather than
+          on the host: each caddy serves the endpoint on its bridge address,
+          for this guest's address only
+          (qt1.infra.guests.caddy.metricsFromMonitoring and its
+          caddyInternal counterpart, which this option sets). Whichever of
+          the two guests is enabled is scraped; with the option off neither
+          caddy collects HTTP metrics at all.
+        '';
+      };
+
+      crowdsecMetrics = lib.mkOption {
+        type = lib.types.bool;
+        default = crowdsec.enable;
+        defaultText = lib.literalExpression "config.qt1.infra.crowdsec.enable";
+        description = ''
+          Collect the host's CrowdSec metrics — active decisions (bans) by
+          scenario, alerts, parser and bucket/scenario counters, LAPI requests
+          per bouncer — into Prometheus, and provision the "CrowdSec /
+          Overview" dashboard that reads them.
+
+          CrowdSec already exposes all of this; the only thing this turns on
+          is serving it on the bridge instead of loopback, so the Prometheus
+          in this guest can reach it (qt1.infra.crowdsec.metricsFromGuests,
+          which this option sets).
+        '';
+      };
+
       headscaleApiKeyFile = lib.mkOption {
         type = lib.types.str;
         default = "/var/lib/microvms/monitoring/headscale-exporter.env";
@@ -124,6 +180,10 @@ in
           proxyAddress = caddyInternal.address;
           headscaleExporter = lib.optionalAttrs cfg.headscaleMetrics {
             target = "${host.hostAddress}:${toString headscaleExporterPort}";
+          };
+          inherit caddyExporters;
+          crowdsecExporter = lib.optionalAttrs cfg.crowdsecMetrics {
+            target = "${host.hostAddress}:${toString crowdsec.metricsPort}";
           };
         };
         credentialFiles = {
@@ -226,6 +286,24 @@ in
         };
       })
 
+      (lib.mkIf cfg.caddyMetrics {
+        # Ask both proxies to serve their HTTP metrics on the bridge, for this
+        # guest's address only — see each guest's own
+        # metricsFromMonitoring. Set for both unconditionally: the option
+        # only does anything inside a guest that is itself enabled, and
+        # caddyExporters (above) is what decides which ones get scraped.
+        qt1.infra.guests.caddy.metricsFromMonitoring = true;
+        qt1.infra.guests.caddyInternal.metricsFromMonitoring = true;
+      })
+
+      (lib.mkIf cfg.crowdsecMetrics {
+        # Same shape, for the host's own CrowdSec: it already exposes these
+        # metrics, on loopback, so all this does is move the listener to the
+        # bridge. No firewall rule here — qt1.infra.crowdsec owns that one,
+        # next to the listener it opens.
+        qt1.infra.crowdsec.metricsFromGuests = true;
+      })
+
       {
         assertions = [
           {
@@ -235,6 +313,10 @@ in
           {
             assertion = cfg.headscaleMetrics -> headscale.enable;
             message = "qt1.infra.guests.monitoring.headscaleMetrics requires qt1.infra.guests.headscale.enable — there is no headscale to read an inventory from otherwise.";
+          }
+          {
+            assertion = cfg.crowdsecMetrics -> crowdsec.enable;
+            message = "qt1.infra.guests.monitoring.crowdsecMetrics requires qt1.infra.crowdsec.enable — there is no CrowdSec serving metrics otherwise.";
           }
         ];
 
@@ -260,9 +342,26 @@ in
         # journal the way caddy does — out of scope for this pass.
         services.alloy.enable = true;
         environment.etc."alloy/config.alloy".text = ''
+          // Keep each entry's systemd unit as a label. Without this the whole
+          // host journal arrives under `job="host"` and nothing downstream can
+          // tell caddy's access log from crowdsec's decisions from a kernel
+          // message — which is exactly what the caddy and crowdsec dashboards'
+          // log panels select on. Bounded cardinality: it's one value per unit
+          // that has ever logged. journald's own fields arrive prefixed with
+          // __journal_ and are dropped unless promoted like this.
+          loki.relabel "journal" {
+            forward_to = []
+
+            rule {
+              source_labels = ["__journal__systemd_unit"]
+              target_label  = "unit"
+            }
+          }
+
           loki.source.journal "host" {
-            labels     = { job = "host" }
-            forward_to = [loki.write.monitoring.receiver]
+            labels        = { job = "host" }
+            relabel_rules = loki.relabel.journal.rules
+            forward_to    = [loki.write.monitoring.receiver]
           }
 
           loki.write "monitoring" {
