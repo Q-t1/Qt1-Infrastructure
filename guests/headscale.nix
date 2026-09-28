@@ -11,8 +11,9 @@
 # own Caddyfile refuses to proxy /api/* at all, so it's not reachable from
 # the WAN full stop — no API key is ever provisioned ahead of time either
 # way, mint one on demand over SSH when actually needed (`headscale apikeys
-# create`). gRPC (`grpc_listen_addr`) stays at its own default of
-# 127.0.0.1-only and was never forwarded from the WAN regardless.
+# create`). The gRPC admin API is not served remotely at all unless
+# grpcFromHost is set (see below), and was never forwarded from the WAN
+# regardless.
 #
 # Stateful: headscale's own node/key database and its Noise and DERP
 # private keys all live under /var/lib/headscale, a persistent volume —
@@ -37,6 +38,8 @@
   internalPort,
   adminSshKeys,
   magicDnsAliases,
+  grpcFromHost,
+  grpcPort,
 }:
 
 {
@@ -78,7 +81,15 @@ in
       port = 22;
       from = config.qt1.guest.gateway;
     }
-  ];
+  ]
+  # The gRPC admin API, when something on the host asks for it (currently
+  # only the headscale metrics exporter, see
+  # ../modules/guests/monitoring.nix). Same reasoning as SSH above: the host
+  # only, never the other guests on the bridge.
+  ++ lib.optional grpcFromHost {
+    port = grpcPort;
+    from = config.qt1.guest.gateway;
+  };
 
   services.openssh = {
     enable = true;
@@ -120,6 +131,14 @@ in
       # that its own listener is plain HTTP as long as server_url matches
       # what's reachable from the outside.
       server_url = serverUrl;
+      # Remote gRPC is only served at all when it has either a certificate
+      # or grpc_allow_insecure — headscale skips the listener otherwise, so
+      # leaving both unset (the default) is what keeps the admin API on its
+      # unix socket. Plaintext is deliberate here: headscale holds no
+      # certificate of its own (caddy terminates TLS in front of it) and the
+      # listener is firewalled to the host, one bridge hop away.
+      grpc_listen_addr = lib.mkIf grpcFromHost "0.0.0.0:${toString grpcPort}";
+      grpc_allow_insecure = lib.mkIf grpcFromHost true;
       dns = {
         # The module's default already, pinned since caddy-internal's apps
         # are only served at MagicDNS names (see magicDnsAliases below).

@@ -20,6 +20,8 @@ let
   cfg = config.qt1.infra.guests.monitoring;
 
   nodeExporterPort = 9100;
+  # prometheus-tailscale-exporter's own default port.
+  headscaleExporterPort = 9250;
   # Must match guests/monitoring.nix.
   grafanaPort = 3000;
 in
@@ -62,6 +64,45 @@ in
         '';
       };
 
+      headscaleMetrics = lib.mkOption {
+        type = lib.types.bool;
+        default = headscale.enable;
+        defaultText = lib.literalExpression "config.qt1.infra.guests.headscale.enable";
+        description = ''
+          Collect headscale's tailnet inventory — nodes, users, pre-auth
+          keys, API keys and their expiries — into Prometheus, and provision
+          the "Headscale / Overview" dashboard that reads it.
+
+          headscale's own /metrics endpoint carries none of this (it only
+          counts map responses), so the numbers come from
+          prometheus-tailscale-exporter, which reads them over headscale's
+          gRPC admin API. That costs three things, all automatic: the gRPC
+          API gets served on the bridge for the host only
+          (qt1.infra.guests.headscale.grpcFromHost), an API key is minted on
+          first boot (monitoring-mint-headscale-apikey, see
+          headscaleApiKeyFile), and the exporter runs on the host next to
+          node_exporter.
+        '';
+      };
+
+      headscaleApiKeyFile = lib.mkOption {
+        type = lib.types.str;
+        default = "/var/lib/microvms/monitoring/headscale-exporter.env";
+        description = ''
+          Host path holding the headscale API key the exporter reads its
+          inventory with, minted automatically the first time this path
+          doesn't exist (see monitoring-mint-headscale-apikey — the same
+          pattern as headscale's own tailscaleAuthKeyFile). Delete it and
+          restart that unit to rotate the key; the old one stays valid until
+          it expires or is revoked with `headscale apikeys expire`.
+
+          An environment file (`HEADSCALE_API_KEY=...`) rather than the bare
+          key, since that's what the exporter's systemd unit consumes. It is
+          never handed to the guest — unlike the Grafana secrets above, the
+          exporter runs on the host.
+        '';
+      };
+
       secretKeyFile = lib.mkOption {
         type = lib.types.str;
         default = "/var/lib/microvms/monitoring/grafana-secret-key";
@@ -81,6 +122,9 @@ in
         module = import ../../guests/monitoring.nix {
           grafanaHostname = "${cfg.grafanaLabel}.${headscale.baseDomain}";
           proxyAddress = caddyInternal.address;
+          headscaleExporter = lib.optionalAttrs cfg.headscaleMetrics {
+            target = "${host.hostAddress}:${toString headscaleExporterPort}";
+          };
         };
         credentialFiles = {
           grafana-admin-password = cfg.adminPasswordFile;
@@ -100,11 +144,97 @@ in
         '');
       })
 
+      (lib.mkIf cfg.headscaleMetrics {
+        # headscale's inventory only comes out of its gRPC admin API, so ask
+        # the headscale guest to serve it on the bridge — host-only, see that
+        # option's own docs.
+        qt1.infra.guests.headscale.grpcFromHost = true;
+
+        # The exporter that turns that API into Prometheus metrics. Host-side
+        # like every other collector here, which also keeps the API key on the
+        # host instead of shipping it into a guest. Bridge-bound only, never
+        # the uplink/WAN interface.
+        services.prometheus.exporters.tailscale = {
+          enable = true;
+          listenAddress = host.hostAddress;
+          port = headscaleExporterPort;
+          environmentFile = cfg.headscaleApiKeyFile;
+        };
+        # The nixpkgs module documents environmentFile for Tailscale's own
+        # SaaS variables; headscale mode reads a different set. Only the API
+        # key among them is a secret, so the other two stay here rather than
+        # in the generated file.
+        systemd.services.prometheus-tailscale-exporter = {
+          serviceConfig.Environment = [
+            "HEADSCALE_ADDRESS=${headscale.address}:${toString headscale.grpcPort}"
+            # Plaintext gRPC: headscale holds no certificate of its own here.
+            # See qt1.infra.guests.headscale.grpcFromHost.
+            "HEADSCALE_INSECURE=true"
+          ];
+          # environmentFile doesn't exist until the unit below has minted the
+          # key, and systemd refuses to start a unit whose EnvironmentFile is
+          # missing.
+          after = [ "monitoring-mint-headscale-apikey.service" ];
+          requires = [ "monitoring-mint-headscale-apikey.service" ];
+        };
+        networking.firewall.interfaces.${host.bridge}.allowedTCPPorts = [ headscaleExporterPort ];
+
+        # Mints the exporter's API key instead of a human running `headscale
+        # apikeys create` by hand, the same way
+        # headscale-mint-tailscale-authkey mints the pre-auth key. Idempotent
+        # on the file already existing, so this is a no-op after the first
+        # successful run.
+        systemd.services.monitoring-mint-headscale-apikey = {
+          description = "Mint a headscale API key for the metrics exporter";
+          after = [ "microvm@headscale.service" ];
+          wants = [ "microvm@headscale.service" ];
+          wantedBy = [ "multi-user.target" ];
+          path = [
+            pkgs.openssh
+            pkgs.coreutils
+          ];
+          serviceConfig = {
+            Type = "oneshot";
+            RemainAfterExit = true;
+            Restart = "on-failure";
+            RestartSec = "10s";
+          };
+          script = ''
+            set -euo pipefail
+
+            dest=${lib.escapeShellArg cfg.headscaleApiKeyFile}
+            if [ -e "$dest" ]; then
+              exit 0
+            fi
+
+            ${infraLib.headscaleRemoteShell headscale}
+
+            # Prometheus-style duration; headscale's own default is 90d,
+            # which would silently stop the exporter a quarter after every
+            # fresh deploy. Read-only inventory over a host-only socket, so
+            # a long-lived key is the right trade here — as with the
+            # pre-auth key, rotate by deleting the file.
+            key=$(remote headscale apikeys create --expiration 10y)
+
+            install -d -m 0755 "$(dirname "$dest")"
+            (
+              umask 0377
+              printf 'HEADSCALE_API_KEY=%s\n' "$key" > "$dest.tmp"
+            )
+            mv "$dest.tmp" "$dest"
+          '';
+        };
+      })
+
       {
         assertions = [
           {
             assertion = caddyInternal.enable;
             message = "qt1.infra.guests.monitoring requires qt1.infra.guests.caddyInternal.enable — the tailnet-only proxy is Grafana's only way in.";
+          }
+          {
+            assertion = cfg.headscaleMetrics -> headscale.enable;
+            message = "qt1.infra.guests.monitoring.headscaleMetrics requires qt1.infra.guests.headscale.enable — there is no headscale to read an inventory from otherwise.";
           }
         ];
 

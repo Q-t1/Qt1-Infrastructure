@@ -25,6 +25,7 @@ guests/caddy-internal.nix        the guest's own NixOS config
 modules/crowdsec.nix             host-side CrowdSec + bouncer (qt1.infra.crowdsec)
 modules/guests/monitoring.nix    host-side VM + collection    (qt1.infra.guests.monitoring)
 guests/monitoring.nix            the guest's own NixOS config
+guests/dashboards/               Grafana dashboards, provisioned per topic
 checks/test-host.nix             minimal host, used only to build this layer alone
 ```
 
@@ -399,6 +400,35 @@ not inside this guest:
   crowdsec's own logs both land there and ship to Loki too. headscale's own
   application logs don't (it never mirrors its console to the host journal
   the way caddy does) — out of scope for now.
+- **headscale's tailnet inventory** (`headscaleMetrics`, on by default
+  whenever `guests.headscale` is enabled): nodes and whether they're online,
+  users, pre-auth keys, API keys, advertised vs. approved routes, and every
+  expiry timestamp among them. headscale's own `/metrics` carries none of
+  that — it only counts map responses — so this comes from
+  [`prometheus-tailscale-exporter`](https://github.com/adinhodovic/tailscale-exporter)
+  on the host (`10.100.0.1:9250`), which reads it over headscale's gRPC admin
+  API. Wiring it up costs three things, all automatic:
+  - headscale serves its gRPC API on the bridge
+    (`guests.headscale.grpcFromHost`), plaintext and source-restricted to the
+    host's address — it holds no certificate of its own, caddy terminates TLS
+    in front of it, and the listener is one bridge hop away from its only
+    caller. With the option off, that API stays on headscale's local unix
+    socket, which is all the `headscale` CLI needs.
+  - an API key is minted on first boot by
+    `monitoring-mint-headscale-apikey`, the same SSH-into-the-guest pattern
+    as headscale's own pre-auth key, and written to
+    `/var/lib/microvms/monitoring/headscale-exporter.env` (10-year expiry;
+    delete the file and restart the unit to rotate).
+  - Grafana provisions
+    [dashboard 24516, "Headscale / Overview"](https://grafana.com/grafana/dashboards/24516-headscale-overview/)
+    (revision 7, vendored in `guests/dashboards/headscale/`) to read it.
+    Provisioned dashboards are read-only in the UI — "Save as" a copy to
+    change one. The dashboard comes from a Kubernetes-shaped mixin and
+    matches every query on `cluster`/`namespace`, so the scrape job attaches
+    both as static labels; without them every panel reads "No data".
+
+  Set `qt1.infra.guests.monitoring.headscaleMetrics = false` to skip all
+  three, including the gRPC listener.
 
 Both Loki and Prometheus default to 30 days' retention, sized against the
 guest's own volumes (`/var/lib/loki` 8G, `/var/lib/prometheus2` 4G).

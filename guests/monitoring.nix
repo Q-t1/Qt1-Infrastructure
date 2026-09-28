@@ -13,9 +13,17 @@
 #
 # Collection itself happens on the HOST, alongside crowdsec.nix
 # (../modules/guests/monitoring.nix): a host-side node_exporter this guest's
-# Prometheus scrapes over the bridge, and host-side Grafana Alloy tailing the
-# host journal into this guest's Loki. Nothing is collected from inside the
-# headscale/caddy guests in this pass.
+# Prometheus scrapes over the bridge, host-side Grafana Alloy tailing the
+# host journal into this guest's Loki, and — when headscaleMetrics is on — a
+# host-side prometheus-tailscale-exporter reading headscale's tailnet
+# inventory out of its gRPC admin API. Nothing is collected from inside the
+# headscale/caddy guests themselves.
+#
+# The one provisioned dashboard, ./dashboards/headscale/headscale-overview.json,
+# is revision 7 of grafana.com dashboard 24516 ("Headscale / Overview",
+# generated from the exporter's own tailscale-mixin), with a single edit: its
+# data source variable points at the Prometheus datasource's pinned uid
+# instead of the mixin's placeholder.
 #
 # Built on ./base.nix; called with the hostname Grafana is served at and
 # caddy-internal's bridge address by the host-side module, since guests are
@@ -24,6 +32,10 @@
 {
   grafanaHostname,
   proxyAddress,
+  # `{ target = "host:port"; }` when the host runs the headscale metrics
+  # exporter (qt1.infra.guests.monitoring.headscaleMetrics), `{ }` otherwise
+  # — it gates both the scrape job and the dashboard that reads it.
+  headscaleExporter ? { },
 }:
 
 { config, lib, ... }:
@@ -165,7 +177,27 @@ in
           }
         ];
       }
-    ];
+    ]
+    ++ lib.optional (headscaleExporter != { }) {
+      # The job name the upstream mixin selects on by default — the
+      # dashboard's `job` variable is populated from it.
+      job_name = "tailscale-exporter";
+      static_configs = [
+        {
+          targets = [ headscaleExporter.target ];
+          labels = {
+            instance = "host";
+            # The dashboard is generated from a Kubernetes-shaped mixin:
+            # every one of its queries matches on cluster and namespace, and
+            # its variables are populated from them, so without these two
+            # labels every panel reads "No data". Their values are arbitrary
+            # here — there is one cluster of one — they just have to exist.
+            cluster = "qt1";
+            namespace = "monitoring";
+          };
+        }
+      ];
+    };
   };
 
   services.grafana = {
@@ -204,6 +236,10 @@ in
         access = "proxy";
         url = "http://127.0.0.1:${toString prometheusPort}";
         isDefault = true;
+        # Pinned rather than generated, so a provisioned dashboard can name
+        # it: the headscale dashboard below carries this uid as its data
+        # source variable's value.
+        uid = "prometheus";
       }
       {
         name = "Loki";
@@ -212,6 +248,15 @@ in
         url = "http://127.0.0.1:${toString lokiPort}";
       }
     ];
+    # Dashboards are provisioned from the store, one provider per topic
+    # directory under ./dashboards, so a provider only appears when whatever
+    # feeds it is actually being collected. They are read-only in the UI as a
+    # result (Grafana reverts an edited provisioned dashboard on its next
+    # scan); "Save as" a copy to modify one.
+    provision.dashboards.settings.providers = lib.optional (headscaleExporter != { }) {
+      name = "headscale";
+      options.path = ./dashboards/headscale;
+    };
   };
   systemd.services = lib.mkMerge [
     {

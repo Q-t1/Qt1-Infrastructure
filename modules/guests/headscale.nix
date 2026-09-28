@@ -62,6 +62,36 @@ in
         '';
       };
 
+      grpcFromHost = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Serve headscale's gRPC admin API on the guest bridge, reachable
+          from the host only (not from other guests, and never from the WAN —
+          this guest has no forwardPorts entry). Off by default: with it off
+          headscale keeps its gRPC API on its local unix socket, which is all
+          the `headscale` CLI running on the guest itself needs.
+
+          Turned on by qt1.infra.guests.monitoring when it collects
+          headscale's inventory metrics, since the exporter that reads them
+          runs on the host alongside the other collectors. Plaintext
+          (`grpc_allow_insecure`): headscale has no certificate of its own
+          here — caddy terminates TLS for it — and this listener never leaves
+          the host-only bridge. Callers still need an API key, minted by
+          monitoring-mint-headscale-apikey.
+        '';
+      };
+
+      grpcPort = lib.mkOption {
+        type = lib.types.port;
+        default = 50443;
+        readOnly = true;
+        description = ''
+          Port headscale's gRPC admin API listens on when grpcFromHost is
+          set — headscale's own default. Bridge-only, host-only.
+        '';
+      };
+
       baseDomain = lib.mkOption {
         type = lib.types.str;
         example = "tailnet.example.com";
@@ -167,6 +197,8 @@ in
             baseDomain
             internalPort
             magicDnsAliases
+            grpcFromHost
+            grpcPort
             ;
           adminSshKeys = host.adminSshKeys ++ cfg.adminSshKeys;
         };
@@ -233,23 +265,7 @@ in
               exit 0
             fi
 
-            known_hosts=$(mktemp)
-            trap 'rm -f "$known_hosts"' EXIT
-            printf '%s %s\n' ${lib.escapeShellArg cfg.address} \
-              "$(ssh-keygen -y -f ${lib.escapeShellArg cfg.sshHostKeyFile})" > "$known_hosts"
-
-            ssh_opts=(
-              -i ${lib.escapeShellArg cfg.automationSshKeyFile}
-              -o UserKnownHostsFile="$known_hosts"
-              -o ConnectTimeout=5
-              -o BatchMode=yes
-            )
-            remote() { ssh "''${ssh_opts[@]}" root@${lib.escapeShellArg cfg.address} "$@"; }
-
-            for _ in $(seq 1 30); do
-              remote true 2>/dev/null && break
-              sleep 2
-            done
+            ${infraLib.headscaleRemoteShell cfg}
 
             find_user_id() {
               # headscale prints the bare JSON `null` (not `[]`) for an empty
