@@ -154,4 +154,36 @@ rec {
         after = [ "${vm}-provision-secrets.service" ];
       };
     };
+
+  # Shell prelude for a host-side oneshot that has to run `headscale`
+  # commands inside the headscale guest: everything the CLI needs has to run
+  # on that guest itself (it talks to the server over a local unix socket),
+  # so the host reaches it over SSH with the unattended keypair
+  # headscale-provision-secrets generates.
+  #
+  # Defines a `remote` function running its arguments as root on the guest,
+  # and waits (up to a minute) for sshd to answer — right after boot it may
+  # not be up yet. Takes the headscale guest's own
+  # `config.qt1.infra.guests.headscale`; the unit needs openssh and coreutils
+  # on its path, `set -euo pipefail`, and no EXIT trap of its own (this one
+  # cleans up the known_hosts file it writes).
+  headscaleRemoteShell = headscale: ''
+    known_hosts=$(mktemp)
+    trap 'rm -f "$known_hosts"' EXIT
+    printf '%s %s\n' ${lib.escapeShellArg headscale.address} \
+      "$(ssh-keygen -y -f ${lib.escapeShellArg headscale.sshHostKeyFile})" > "$known_hosts"
+
+    ssh_opts=(
+      -i ${lib.escapeShellArg headscale.automationSshKeyFile}
+      -o UserKnownHostsFile="$known_hosts"
+      -o ConnectTimeout=5
+      -o BatchMode=yes
+    )
+    remote() { ssh "''${ssh_opts[@]}" root@${lib.escapeShellArg headscale.address} "$@"; }
+
+    for _ in $(seq 1 30); do
+      remote true 2>/dev/null && break
+      sleep 2
+    done
+  '';
 }

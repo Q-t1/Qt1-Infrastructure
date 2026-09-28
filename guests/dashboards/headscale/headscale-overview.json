@@ -1,0 +1,1571 @@
+{
+  "__inputs": [],
+  "__requires": [],
+  "annotations": {
+    "list": []
+  },
+  "description": "An overview of Headscale metrics including nodes (registration method, routes, lifecycle), users (by provider), and access management (API keys, pre-auth keys usage, reusability, and expiry). The dashboards were generated using [tailscale-mixin](https://github.com/adinhodovic/tailscale-exporter/tree/main/tailscale-mixin). Open issues and create feature requests in the repository.",
+  "editable": false,
+  "gnetId": 24516,
+  "links": [
+    {
+      "asDropdown": true,
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [
+        "tailscale",
+        "headscale",
+        "tailscaled",
+        "tailscale-mixin"
+      ],
+      "targetBlank": true,
+      "title": "Tailscale",
+      "type": "dashboards"
+    }
+  ],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "title": "Summary",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "description": "Total number of users known to Headscale.",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 1
+      },
+      "id": 2,
+      "options": {
+        "graphMode": "area",
+        "percentChangeColorMode": "standard",
+        "showPercentChange": false
+      },
+      "pluginVersion": "v11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "count(\n  headscale_users_info{\n    cluster=\"$cluster\"\n,\nnamespace=\"$namespace\",\njob=\"$job\"\n\n  }\n)\n",
+          "instant": false
+        }
+      ],
+      "title": "Users",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "description": "Number of Headscale nodes discovered by the exporter.",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 1
+      },
+      "id": 3,
+      "options": {
+        "graphMode": "area",
+        "percentChangeColorMode": "standard",
+        "showPercentChange": false
+      },
+      "pluginVersion": "v11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "count(\n  headscale_nodes_info{\n    cluster=\"$cluster\"\n,\nnamespace=\"$namespace\",\njob=\"$job\"\n\n  }\n)\n",
+          "instant": false
+        }
+      ],
+      "title": "Nodes",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "description": "Nodes currently online according to Headscale.",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 1
+      },
+      "id": 4,
+      "options": {
+        "graphMode": "area",
+        "percentChangeColorMode": "standard",
+        "showPercentChange": false
+      },
+      "pluginVersion": "v11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "sum(\n  headscale_nodes_online{\n    cluster=\"$cluster\"\n,\nnamespace=\"$namespace\",\njob=\"$job\"\n\n  }\n)\n",
+          "instant": false
+        }
+      ],
+      "title": "Online Nodes",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "description": "Count of Headscale API keys.",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 1
+      },
+      "id": 5,
+      "options": {
+        "graphMode": "area",
+        "percentChangeColorMode": "standard",
+        "showPercentChange": false
+      },
+      "pluginVersion": "v11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "count(\n  headscale_apikeys_info{\n    cluster=\"$cluster\"\n,\nnamespace=\"$namespace\",\njob=\"$job\"\n\n  }\n)\n",
+          "instant": false
+        }
+      ],
+      "title": "API Keys",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "description": "Count of Headscale pre-authentication keys.",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 1
+      },
+      "id": 6,
+      "options": {
+        "graphMode": "area",
+        "percentChangeColorMode": "standard",
+        "showPercentChange": false
+      },
+      "pluginVersion": "v11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "count(\n  headscale_preauthkeys_info{\n    cluster=\"$cluster\"\n,\nnamespace=\"$namespace\",\njob=\"$job\"\n\n  }\n)\n",
+          "instant": false
+        }
+      ],
+      "title": "Pre-auth Keys",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "description": "Reported database connectivity state from the Headscale health endpoint.",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "red",
+                  "text": "Down"
+                },
+                "1": {
+                  "color": "green",
+                  "text": "Up"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "bool"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 1
+      },
+      "id": 7,
+      "options": {
+        "graphMode": "area",
+        "percentChangeColorMode": "standard",
+        "showPercentChange": false
+      },
+      "pluginVersion": "v11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "max(\n  headscale_health_database_connectivity{\n    cluster=\"$cluster\"\n,\nnamespace=\"$namespace\",\njob=\"$job\"\n\n  }\n)\n",
+          "instant": false
+        }
+      ],
+      "title": "Database Connectivity",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "id": 8,
+      "title": "Nodes",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "description": "Distribution of routes advertised by nodes grouped by state.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 6
+      },
+      "id": 9,
+      "options": {
+        "displayLabels": [
+          "percent"
+        ],
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "values": [
+            "percent"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "v11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "sum(\n  headscale_nodes_approved_routes{\n    cluster=\"$cluster\"\n,\nnamespace=\"$namespace\",\njob=\"$job\"\n\n  }\n)\n",
+          "instant": true,
+          "legendFormat": "Approved"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "sum(\n  headscale_nodes_available_routes{\n    cluster=\"$cluster\"\n,\nnamespace=\"$namespace\",\njob=\"$job\"\n\n  }\n)\n",
+          "instant": true,
+          "legendFormat": "Available"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "sum(\n  headscale_nodes_subnet_routes{\n    cluster=\"$cluster\"\n,\nnamespace=\"$namespace\",\njob=\"$job\"\n\n  }\n)\n",
+          "instant": true,
+          "legendFormat": "Subnet"
+        }
+      ],
+      "title": "Advertised Routes",
+      "type": "piechart"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "description": "Distribution of nodes grouped by registration method.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 8,
+        "y": 6
+      },
+      "id": 10,
+      "options": {
+        "displayLabels": [
+          "percent"
+        ],
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "values": [
+            "percent"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "v11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "count(\n  headscale_nodes_info{\n    cluster=\"$cluster\"\n,\nnamespace=\"$namespace\",\njob=\"$job\"\n\n  }\n) by (register_method)\n",
+          "instant": true,
+          "legendFormat": "{{ register_method }}"
+        }
+      ],
+      "title": "Nodes by Register Method",
+      "type": "piechart"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "description": "Total number of tags applied across all nodes.",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 6
+      },
+      "id": 11,
+      "options": {
+        "graphMode": "area",
+        "percentChangeColorMode": "standard",
+        "showPercentChange": false
+      },
+      "pluginVersion": "v11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "sum(\n  headscale_nodes_tags{\n    cluster=\"$cluster\"\n,\nnamespace=\"$namespace\",\njob=\"$job\"\n\n  }\n)\n",
+          "instant": false
+        }
+      ],
+      "title": "Node Tags",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "description": "Node metadata, ownership, registration details, and lifecycle timestamps reported by Headscale.",
+      "fieldConfig": {
+        "defaults": {
+          "links": [],
+          "thresholds": {
+            "steps": []
+          },
+          "unit": "string"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "ID"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "string"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Created"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Last Seen"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Expiry"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 11
+      },
+      "id": 12,
+      "options": {
+        "footer": {
+          "enablePagination": true
+        },
+        "sortBy": [
+          {
+            "desc": false,
+            "displayName": "Name"
+          }
+        ]
+      },
+      "pluginVersion": "v11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "headscale_nodes_info{\n  cluster=\"$cluster\"\n,\nnamespace=\"$namespace\",\njob=\"$job\"\n\n}\n",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "min(\n  headscale_nodes_created_timestamp{\n    cluster=\"$cluster\"\n,\nnamespace=\"$namespace\",\njob=\"$job\"\n\n  } * 1000\n) by (id, name, user)\n",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "max(\n  headscale_nodes_last_seen_timestamp{\n    cluster=\"$cluster\"\n,\nnamespace=\"$namespace\",\njob=\"$job\"\n\n  } * 1000\n) by (id, name, user)\n",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "min(\n  headscale_nodes_expiry_timestamp{\n    cluster=\"$cluster\"\n,\nnamespace=\"$namespace\",\njob=\"$job\"\n\n  } * 1000\n) by (id, name, user)\n",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "title": "Nodes",
+      "transformations": [
+        {
+          "id": "merge"
+        },
+        {
+          "id": "organize",
+          "options": {
+            "includeByName": {
+              "Value #B": true,
+              "Value #C": true,
+              "Value #D": true,
+              "given_name": true,
+              "id": true,
+              "name": true,
+              "node_key": true,
+              "register_method": true,
+              "tailscale_ip": true,
+              "tailscale_ipv6": true,
+              "user": true,
+              "user_id": true
+            },
+            "indexByName": {
+              "Value #B": 9,
+              "Value #C": 10,
+              "Value #D": 11,
+              "given_name": 4,
+              "id": 0,
+              "name": 1,
+              "node_key": 8,
+              "register_method": 5,
+              "tailscale_ip": 6,
+              "tailscale_ipv6": 7,
+              "user": 2,
+              "user_id": 3
+            },
+            "renameByName": {
+              "Value #B": "Created",
+              "Value #C": "Last Seen",
+              "Value #D": "Expiry",
+              "given_name": "Given Name",
+              "id": "ID",
+              "name": "Name",
+              "node_key": "Node Key",
+              "register_method": "Register Method",
+              "tailscale_ip": "Tailscale IP",
+              "tailscale_ipv6": "Tailscale IPv6",
+              "user": "User",
+              "user_id": "User ID"
+            }
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "description": "Nodes with operational follow-up items: offline status or available routes that are not approved.",
+      "fieldConfig": {
+        "defaults": {
+          "links": [],
+          "thresholds": {
+            "steps": []
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Offline"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "0": {
+                        "text": "No"
+                      },
+                      "1": {
+                        "text": "Yes"
+                      }
+                    },
+                    "type": "value"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 31
+      },
+      "id": 13,
+      "options": {
+        "footer": {
+          "enablePagination": true
+        },
+        "sortBy": [
+          {
+            "desc": false,
+            "displayName": "Name"
+          }
+        ]
+      },
+      "pluginVersion": "v11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "1\n-\nmax(\n  headscale_nodes_online{\n    cluster=\"$cluster\"\n,\nnamespace=\"$namespace\",\njob=\"$job\"\n\n  }\n) by (id, name, user)\n> 0\n",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "sum(\n  headscale_nodes_available_routes{\n    cluster=\"$cluster\"\n,\nnamespace=\"$namespace\",\njob=\"$job\"\n\n  }\n) by (id, name, user)\n-\nsum(\n  headscale_nodes_approved_routes{\n    cluster=\"$cluster\"\n,\nnamespace=\"$namespace\",\njob=\"$job\"\n\n  }\n) by (id, name, user)\n> 0\n",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "title": "Nodes Requiring Attention",
+      "transformations": [
+        {
+          "id": "merge"
+        },
+        {
+          "id": "organize",
+          "options": {
+            "includeByName": {
+              "Value #A": true,
+              "Value #B": true,
+              "id": true,
+              "name": true,
+              "user": true
+            },
+            "indexByName": {
+              "Value #A": 3,
+              "Value #B": 4,
+              "id": 0,
+              "name": 1,
+              "user": 2
+            },
+            "renameByName": {
+              "Value #A": "Offline",
+              "Value #B": "Unapproved Routes",
+              "id": "ID",
+              "name": "Name",
+              "user": "User"
+            }
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 39
+      },
+      "id": 14,
+      "title": "Users",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "description": "Distribution of users grouped by identity provider.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 4,
+        "x": 0,
+        "y": 40
+      },
+      "id": 15,
+      "options": {
+        "displayLabels": [
+          "percent"
+        ],
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "values": [
+            "percent"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "v11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "count(\n  headscale_users_info{\n    cluster=\"$cluster\"\n,\nnamespace=\"$namespace\",\njob=\"$job\"\n\n  }\n) by (provider)\n",
+          "instant": true,
+          "legendFormat": "{{ provider }}"
+        }
+      ],
+      "title": "Users by Provider",
+      "type": "piechart"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "description": "User metadata reported by Headscale.",
+      "fieldConfig": {
+        "defaults": {
+          "links": [],
+          "thresholds": {
+            "steps": []
+          },
+          "unit": "string"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 20,
+        "x": 4,
+        "y": 40
+      },
+      "id": 16,
+      "options": {
+        "footer": {
+          "enablePagination": true
+        },
+        "sortBy": [
+          {
+            "desc": false,
+            "displayName": "Name"
+          }
+        ]
+      },
+      "pluginVersion": "v11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "headscale_users_info{\n  cluster=\"$cluster\"\n,\nnamespace=\"$namespace\",\njob=\"$job\"\n\n}\n",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "title": "Users",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "includeByName": {
+              "display_name": true,
+              "email": true,
+              "id": true,
+              "name": true,
+              "provider": true,
+              "provider_id": true
+            },
+            "indexByName": {
+              "display_name": 2,
+              "email": 3,
+              "id": 0,
+              "name": 1,
+              "provider": 4,
+              "provider_id": 5
+            },
+            "renameByName": {
+              "display_name": "Display Name",
+              "email": "Email",
+              "id": "ID",
+              "name": "Name",
+              "provider": "Provider",
+              "provider_id": "Provider ID"
+            }
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 48
+      },
+      "id": 17,
+      "title": "Access Management",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "description": "Breakdown of used vs unused pre-authentication keys.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 49
+      },
+      "id": 18,
+      "options": {
+        "displayLabels": [
+          "percent"
+        ],
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "values": [
+            "percent"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "v11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "count(\n  headscale_preauthkeys_info{\n    cluster=\"$cluster\"\n,\nnamespace=\"$namespace\",\njob=\"$job\"\n,\n    used=\"true\"\n  }\n)\n",
+          "instant": true,
+          "legendFormat": "Used"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "count(\n  headscale_preauthkeys_info{\n    cluster=\"$cluster\"\n,\nnamespace=\"$namespace\",\njob=\"$job\"\n,\n    used=\"false\"\n  }\n)\n",
+          "instant": true,
+          "legendFormat": "Unused"
+        }
+      ],
+      "title": "Pre-auth Keys Usage",
+      "type": "piechart"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "description": "Distribution of reusable vs single-use pre-authentication keys.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 8,
+        "y": 49
+      },
+      "id": 19,
+      "options": {
+        "displayLabels": [
+          "percent"
+        ],
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "values": [
+            "percent"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "v11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "count(\n  headscale_preauthkeys_info{\n    cluster=\"$cluster\"\n,\nnamespace=\"$namespace\",\njob=\"$job\"\n,\n    reusable=\"true\"\n  }\n)\n",
+          "instant": true,
+          "legendFormat": "Reusable"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "count(\n  headscale_preauthkeys_info{\n    cluster=\"$cluster\"\n,\nnamespace=\"$namespace\",\njob=\"$job\"\n,\n    reusable=\"false\"\n  }\n)\n",
+          "instant": true,
+          "legendFormat": "Single-use"
+        }
+      ],
+      "title": "Pre-auth Keys Reusable",
+      "type": "piechart"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "description": "Distribution of ephemeral vs persistent pre-authentication keys.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 49
+      },
+      "id": 20,
+      "options": {
+        "displayLabels": [
+          "percent"
+        ],
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "values": [
+            "percent"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "v11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "count(\n  headscale_preauthkeys_info{\n    cluster=\"$cluster\"\n,\nnamespace=\"$namespace\",\njob=\"$job\"\n,\n    ephemeral=\"true\"\n  }\n)\n",
+          "instant": true,
+          "legendFormat": "Ephemeral"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "count(\n  headscale_preauthkeys_info{\n    cluster=\"$cluster\"\n,\nnamespace=\"$namespace\",\njob=\"$job\"\n,\n    ephemeral=\"false\"\n  }\n)\n",
+          "instant": true,
+          "legendFormat": "Persistent"
+        }
+      ],
+      "title": "Pre-auth Keys Ephemeral",
+      "type": "piechart"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "description": "API keys and pre-authentication keys expiring in the next seven days. Values are seconds until expiry.",
+      "fieldConfig": {
+        "defaults": {
+          "links": [],
+          "thresholds": {
+            "steps": []
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 54
+      },
+      "id": 21,
+      "options": {
+        "footer": {
+          "enablePagination": true
+        }
+      },
+      "pluginVersion": "v11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "time() + 7 * 24 * 60 * 60\n-\nmax(\n  headscale_apikeys_expiration_timestamp{\n    cluster=\"$cluster\"\n,\nnamespace=\"$namespace\",\njob=\"$job\"\n\n  }\n) by (id, prefix)\n> 0\n",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "time() + 7 * 24 * 60 * 60\n-\nmax(\n  headscale_preauthkeys_expiration_timestamp{\n    cluster=\"$cluster\"\n,\nnamespace=\"$namespace\",\njob=\"$job\"\n\n  }\n) by (id, user)\n> 0\n",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "title": "Access Keys Requiring Attention",
+      "transformations": [
+        {
+          "id": "merge"
+        },
+        {
+          "id": "organize",
+          "options": {
+            "includeByName": {
+              "Value #A": true,
+              "Value #B": true,
+              "id": true,
+              "prefix": true,
+              "user": true
+            },
+            "indexByName": {
+              "Value #A": 3,
+              "Value #B": 4,
+              "id": 0,
+              "prefix": 1,
+              "user": 2
+            },
+            "renameByName": {
+              "Value #A": "API Key Seconds Until Expiry",
+              "Value #B": "Pre-auth Key Seconds Until Expiry",
+              "id": "ID",
+              "prefix": "Prefix",
+              "user": "User"
+            }
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 62
+      },
+      "id": 22,
+      "title": "Access Key Details",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "description": "Lifecycle information (created, expiration, last seen) for API keys.",
+      "fieldConfig": {
+        "defaults": {
+          "links": [],
+          "thresholds": {
+            "steps": []
+          },
+          "unit": "string"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Created"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Expires"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Last Seen"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 63
+      },
+      "id": 23,
+      "options": {
+        "footer": {
+          "enablePagination": true
+        },
+        "sortBy": [
+          {
+            "desc": false,
+            "displayName": "prefix"
+          }
+        ]
+      },
+      "pluginVersion": "v11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "min(\n  headscale_apikeys_created_timestamp{\n    cluster=\"$cluster\"\n,\nnamespace=\"$namespace\",\njob=\"$job\"\n\n  } * 1000\n) by (id, prefix)\n",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "min(\n  headscale_apikeys_expiration_timestamp{\n    cluster=\"$cluster\"\n,\nnamespace=\"$namespace\",\njob=\"$job\"\n\n  } * 1000\n) by (id, prefix)\n",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "max(\n  headscale_apikeys_last_seen_timestamp{\n    cluster=\"$cluster\"\n,\nnamespace=\"$namespace\",\njob=\"$job\"\n\n  } * 1000\n) by (id, prefix)\n",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "title": "API Keys",
+      "transformations": [
+        {
+          "id": "merge"
+        },
+        {
+          "id": "organize",
+          "options": {
+            "includeByName": {
+              "Value #A": true,
+              "Value #B": true,
+              "Value #C": true,
+              "id": true,
+              "prefix": true
+            },
+            "indexByName": {
+              "Value #A": 2,
+              "Value #B": 3,
+              "Value #C": 4,
+              "id": 0,
+              "prefix": 1
+            },
+            "renameByName": {
+              "Value #A": "Created",
+              "Value #B": "Expires",
+              "Value #C": "Last Seen",
+              "id": "ID",
+              "prefix": "Prefix"
+            }
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "description": "Metadata and lifecycle information for Headscale pre-authentication keys.",
+      "fieldConfig": {
+        "defaults": {
+          "links": [],
+          "thresholds": {
+            "steps": []
+          },
+          "unit": "string"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Created"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Expiration"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 73
+      },
+      "id": 24,
+      "options": {
+        "footer": {
+          "enablePagination": true
+        },
+        "sortBy": [
+          {
+            "desc": false,
+            "displayName": "user"
+          }
+        ]
+      },
+      "pluginVersion": "v11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "headscale_preauthkeys_info{\n  cluster=\"$cluster\"\n,\nnamespace=\"$namespace\",\njob=\"$job\"\n\n}\n",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "min(\n  headscale_preauthkeys_created_timestamp{\n    cluster=\"$cluster\"\n,\nnamespace=\"$namespace\",\njob=\"$job\"\n\n  } * 1000\n) by (id, user)\n",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "min(\n  headscale_preauthkeys_expiration_timestamp{\n    cluster=\"$cluster\"\n,\nnamespace=\"$namespace\",\njob=\"$job\"\n\n  } * 1000\n) by (id, user)\n",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "title": "Pre-auth Keys",
+      "transformations": [
+        {
+          "id": "merge"
+        },
+        {
+          "id": "organize",
+          "options": {
+            "includeByName": {
+              "Value #B": true,
+              "Value #C": true,
+              "acl_tags": true,
+              "ephemeral": true,
+              "id": true,
+              "reusable": true,
+              "used": true,
+              "user": true
+            },
+            "indexByName": {
+              "Value #A": 6,
+              "Value #B": 6,
+              "Value #C": 7,
+              "acl_tags": 5,
+              "ephemeral": 3,
+              "id": 0,
+              "reusable": 2,
+              "used": 4,
+              "user": 1
+            },
+            "renameByName": {
+              "Value #A": "ID",
+              "Value #B": "Created",
+              "Value #C": "Expiration",
+              "acl_tags": "ACL Tags",
+              "ephemeral": "Ephemeral",
+              "id": "ID",
+              "reusable": "Reusable",
+              "used": "Used",
+              "user": "User"
+            }
+          }
+        }
+      ],
+      "type": "table"
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": [
+    "tailscale",
+    "headscale",
+    "tailscaled",
+    "tailscale-mixin"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "selected": true,
+          "text": "Prometheus",
+          "value": "prometheus"
+        },
+        "label": "Data source",
+        "name": "datasource",
+        "query": "prometheus",
+        "type": "datasource"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "hide": 2,
+        "label": "Cluster",
+        "name": "cluster",
+        "query": "label_values(headscale_up, cluster)",
+        "refresh": 2,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "label": "Namespace",
+        "name": "namespace",
+        "query": "label_values(headscale_up{cluster=\"$cluster\"}, namespace)",
+        "refresh": 2,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "label": "Job",
+        "name": "job",
+        "query": "label_values(headscale_up{cluster=\"$cluster\", namespace=\"$namespace\"}, job)",
+        "refresh": 2,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timezone": "utc",
+  "title": "Headscale / Overview",
+  "uid": "headscale-mixin-over-k12e"
+}
