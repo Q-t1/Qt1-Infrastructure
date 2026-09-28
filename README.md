@@ -241,9 +241,18 @@ qt1.infra.crowdsec.enable = true;
 Two things this depends on that are easy to get wrong by hand, so they're
 built in rather than left as setup steps:
 
-- **Caddy needs an access log to begin with** — off by default in caddy
-  itself. `guests/caddy.nix` adds a bare `log` directive for exactly this;
-  without it there's nothing for CrowdSec to read.
+- **Caddy needs an access log, on stdout, at INFO** — caddy logs no requests
+  at all by default, and the two obvious ways to turn it on both produce
+  nothing readable here. `guests/caddy.nix` sets the vhost's own
+  `logFormat = "output stdout"`: the guest mirrors stdout to its console and
+  the host's journal, which is the only way anything leaves that guest and
+  the only thing CrowdSec reads. A bare `log` directive instead points the
+  access log at caddy's *default* logger, which `services.caddy` pins at
+  level `ERROR` — access entries are INFO, so caddy silently logs nothing —
+  and the nixpkgs module's own default writes them to a file under
+  `/var/log/caddy` inside the guest's tmpfs root, where nothing can read them
+  and they grow in RAM. Both were live here until the caddy/crowdsec
+  dashboards made the silence visible.
 - **The ban has to land on `FORWARD`, not just `INPUT`.** The WAN traffic
   this protects is never delivered to the host itself — it's `FORWARD`ed
   on to the caddy guest by `qt1.infra.microvmHost`'s NAT

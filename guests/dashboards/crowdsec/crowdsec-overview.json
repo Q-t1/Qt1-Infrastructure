@@ -70,7 +70,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "$datasource" },
-          "expr": "sum(cs_active_decisions{job=\"crowdsec\"})",
+          "expr": "sum(cs_active_decisions{job=\"crowdsec\"}) or vector(0)",
           "instant": true,
           "refId": "A"
         }
@@ -91,7 +91,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "$datasource" },
-          "expr": "sum(cs_alerts{job=\"crowdsec\"})",
+          "expr": "sum(cs_alerts{job=\"crowdsec\"}) or vector(0)",
           "instant": true,
           "refId": "A"
         }
@@ -112,7 +112,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "$datasource" },
-          "expr": "sum(increase(cs_bucket_overflowed_total{job=\"crowdsec\"}[$__range]))",
+          "expr": "sum(increase(cs_bucket_overflowed_total{job=\"crowdsec\"}[$__range])) or vector(0)",
           "instant": true,
           "refId": "A"
         }
@@ -133,7 +133,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "$datasource" },
-          "expr": "sum(rate(cs_parser_hits_ok_total{job=\"crowdsec\"}[$__rate_interval]))",
+          "expr": "sum(rate(cs_parser_hits_ok_total{job=\"crowdsec\"}[$__rate_interval])) or vector(0)",
           "refId": "A"
         }
       ],
@@ -153,7 +153,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "$datasource" },
-          "expr": "sum(cs_buckets{job=\"crowdsec\"})",
+          "expr": "sum(cs_buckets{job=\"crowdsec\"}) or vector(0)",
           "instant": true,
           "refId": "A"
         }
@@ -332,13 +332,13 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "$datasource" },
-          "expr": "sum(rate(cs_parser_hits_ok_total{job=\"crowdsec\"}[$__rate_interval]))",
+          "expr": "sum(rate(cs_parser_hits_ok_total{job=\"crowdsec\"}[$__rate_interval])) or vector(0)",
           "legendFormat": "parsed",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "$datasource" },
-          "expr": "sum(rate(cs_parser_hits_ko_total{job=\"crowdsec\"}[$__rate_interval]))",
+          "expr": "sum(rate(cs_parser_hits_ko_total{job=\"crowdsec\"}[$__rate_interval])) or vector(0)",
           "legendFormat": "unparsed",
           "refId": "B"
         }

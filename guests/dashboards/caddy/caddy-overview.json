@@ -55,7 +55,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "$datasource" },
-          "expr": "sum(rate(caddy_http_request_duration_seconds_count{job=\"caddy\", instance=~\"$instance\", host=~\"$vhost\"}[$__rate_interval]))",
+          "expr": "sum(rate(caddy_http_request_duration_seconds_count{job=\"caddy\", instance=~\"$instance\", host=~\"$vhost\"}[$__rate_interval])) or vector(0)",
           "refId": "A"
         }
       ],
@@ -85,7 +85,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "$datasource" },
-          "expr": "sum(rate(caddy_http_request_duration_seconds_count{job=\"caddy\", instance=~\"$instance\", host=~\"$vhost\", code=~\"5..\"}[$__rate_interval]))",
+          "expr": "sum(rate(caddy_http_request_duration_seconds_count{job=\"caddy\", instance=~\"$instance\", host=~\"$vhost\", code=~\"5..\"}[$__rate_interval])) or vector(0)",
           "refId": "A"
         }
       ],
@@ -108,7 +108,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "$datasource" },
-          "expr": "sum(rate(caddy_http_request_errors_total{job=\"caddy\", instance=~\"$instance\"}[$__rate_interval]))",
+          "expr": "sum(rate(caddy_http_request_errors_total{job=\"caddy\", instance=~\"$instance\"}[$__rate_interval])) or vector(0)",
           "refId": "A"
         }
       ],
@@ -131,7 +131,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "$datasource" },
-          "expr": "sum(caddy_http_requests_in_flight{job=\"caddy\", instance=~\"$instance\"})",
+          "expr": "sum(caddy_http_requests_in_flight{job=\"caddy\", instance=~\"$instance\"}) or vector(0)",
           "instant": true,
           "refId": "A"
         }
@@ -507,18 +507,20 @@
       },
       {
         "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "allValue": ".*",
         "includeAll": true,
         "current": { "selected": true, "text": "All", "value": "$__all" },
         "label": "Proxy",
         "multi": true,
         "name": "instance",
-        "query": "label_values(caddy_http_requests_in_flight{job=\"caddy\"}, instance)",
+        "query": "label_values(up{job=\"caddy\"}, instance)",
         "refresh": 2,
         "sort": 1,
         "type": "query"
       },
       {
         "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "allValue": ".*",
         "includeAll": true,
         "current": { "selected": true, "text": "All", "value": "$__all" },
         "label": "Vhost",

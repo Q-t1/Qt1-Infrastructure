@@ -104,6 +104,23 @@ in
     inherit (metrics) port from;
   };
 
+  # Mirror caddy's own output to this guest's serial console, exactly as
+  # ./caddy.nix does and for the same reason: no SSH, a tmpfs root, so its
+  # journal dies with it. Without this its access log (stdout, see logFormat
+  # below) never leaves the guest — not to `journalctl -u
+  # microvm@caddy-internal` on the host, not to Loki, and so not to the caddy
+  # dashboard's log panel either.
+  #
+  # The volume is bounded by requests, and requests here are one person
+  # browsing internal apps. Grafana's own auto-refresh does feed a few lines
+  # per interval back through this path into the Loki it reads from, which is
+  # a loop but a shrinking one: a handful of access lines per refresh, and
+  # ingesting them generates no requests of its own.
+  systemd.services.caddy.serviceConfig = {
+    StandardOutput = "journal+console";
+    StandardError = "journal+console";
+  };
+
   services.caddy = {
     enable = true;
     # Issue every certificate from caddy's own local CA instead of an ACME
@@ -130,9 +147,13 @@ in
     virtualHosts = lib.mapAttrs' (
       label: upstream:
       lib.nameValuePair "https://${label}.${baseDomain}" {
-        # Access log to the journal instead of the module's default
-        # per-vhost file (named after the whole site address, scheme
-        # included).
+        # Access log to stdout — and from there to the guest's console and the
+        # host's journal (see systemd.services.caddy above) — instead of the
+        # module's default per-vhost file (named after the whole site address,
+        # scheme included) inside this guest's tmpfs root. Note this is the
+        # vhost's own logger, whose level defaults to INFO; pointing the
+        # access log at caddy's default logger instead would mute it, since
+        # services.caddy pins that one at ERROR.
         logFormat = "output stdout";
         extraConfig = ''
           reverse_proxy ${upstream}
