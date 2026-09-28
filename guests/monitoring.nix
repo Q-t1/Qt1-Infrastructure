@@ -229,6 +229,25 @@ in
         secret_key = "$__file{/run/credentials/grafana.service/grafana-secret-key}";
       };
     };
+    # Grafana matches a provisioned datasource by name and then *updates it
+    # by uid*, so introducing a uid for a datasource that already exists in
+    # its database fails the whole provisioning step with "Datasource
+    # provisioning error: data source not found" — and a failed provisioning
+    # module takes the entire process down, not just the datasource. Deleting
+    # by name first turns that update into an insert. Reproduced and verified
+    # against grafana 13.1.6.
+    #
+    # Delete-then-insert runs on every start, but the uid below is pinned, so
+    # the datasource is recreated identically and anything referencing it by
+    # uid keeps working. The one casualty is a hand-made dashboard still
+    # pointing at the random uid grafana generated before this was pinned;
+    # repoint it at "prometheus" once.
+    provision.datasources.settings.deleteDatasources = [
+      {
+        name = "Prometheus";
+        orgId = 1;
+      }
+    ];
     provision.datasources.settings.datasources = [
       {
         name = "Prometheus";
