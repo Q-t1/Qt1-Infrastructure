@@ -110,6 +110,64 @@ in
         }
       ];
 
+      # The one parser that makes any of the above produce an event, and it
+      # has two jobs — both of which have to happen before
+      # crowdsecurity/caddy-logs (s01-parse) can do anything:
+      #
+      #  1. Strip the serial-console prefix. The acquisition reads the caddy
+      #     guest's mirrored console, so each line arrives as
+      #     `[   12.345678] caddy[480]: {"level":...}` — journald's console
+      #     format wrapped around caddy's JSON. caddy-logs unmarshals the line
+      #     as JSON, and a prefixed line is not JSON. The prefix is optional in
+      #     the pattern, so a line that ever arrives bare parses too.
+      #
+      #  2. Set evt.Parsed.message and evt.Parsed.program, which is what
+      #     caddy-logs actually filters on (`evt.Parsed.program startsWith
+      #     'caddy'`). Normally crowdsecurity/non-syslog does this, but that
+      #     parser ships inside crowdsecurity/syslog-logs, which the
+      #     crowdsecurity/caddy collection does not depend on: the collection
+      #     installs caddy-logs (s01) and http-logs (s02) and nothing in
+      #     s00-raw at all. Without this, every line failed the very first
+      #     stage even when it was clean JSON.
+      #
+      # Ordering is safe: crowdsec sorts parsers by their path, this is the
+      # only thing in s00-raw, and the name the nixpkgs module gives it
+      # (parsers-s00-raw.yaml) sorts ahead of anything a hub collection would
+      # install beside it.
+      #
+      # Verified with `cscli explain` against a real line off this host: the
+      # chain now reaches s01-parse, s02-enrich and the scenarios
+      # (http-probing, http-sensitive-files, http-crawl-non_statics on a 404
+      # probe), and a systemd line from the same console still fails
+      # caddy-logs — i.e. it stays counted as unparsed instead of becoming a
+      # bogus event.
+      localConfig.parsers.s00Raw = [
+        {
+          name = "qt1/microvm-console";
+          description = "Strip the serial-console prefix from the caddy guest's mirrored logs, and hand the line to the hub's caddy parser the way crowdsecurity/non-syslog would";
+          filter = "evt.Line.Labels.type == 'caddy'";
+          onsuccess = "next_stage";
+          nodes = [
+            {
+              grok = {
+                pattern = "^(?:\\[\\s*%{NUMBER}\\] %{NOTSPACE}: )?%{GREEDYDATA:console_payload}$";
+                apply_on = "Line.Raw";
+              };
+            }
+          ];
+          statics = [
+            {
+              parsed = "message";
+              expression = "evt.Parsed.console_payload";
+            }
+            {
+              parsed = "program";
+              expression = "evt.Line.Labels.type";
+            }
+          ];
+        }
+      ];
+
       # Needed for the firewall bouncer below to authenticate against a
       # local API at all; stays loopback-only (127.0.0.1:8080 by default),
       # never reachable from the guest bridge or the WAN.

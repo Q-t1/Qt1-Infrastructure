@@ -238,8 +238,9 @@ bouncer, which drops it at the host before it ever reaches caddy:
 qt1.infra.crowdsec.enable = true;
 ```
 
-Two things this depends on that are easy to get wrong by hand, so they're
-built in rather than left as setup steps:
+Three things this depends on that are easy to get wrong by hand — all three
+were silently wrong here until the CrowdSec dashboard showed 0 parsed events —
+so they're built in rather than left as setup steps:
 
 - **Caddy needs an access log, on stdout, at INFO** — caddy logs no requests
   at all by default, and the two obvious ways to turn it on both produce
@@ -253,6 +254,20 @@ built in rather than left as setup steps:
   `/var/log/caddy` inside the guest's tmpfs root, where nothing can read them
   and they grow in RAM. Both were live here until the caddy/crowdsec
   dashboards made the silence visible.
+- **Something has to feed the hub's caddy parser.** The `crowdsecurity/caddy`
+  collection installs a parser for `s01-parse` and an enricher for
+  `s02-enrich` and *nothing* for `s00-raw` — yet its parser filters on
+  `evt.Parsed.program` and reads `evt.Parsed.message`, fields that only exist
+  once an `s00-raw` parser has set them (normally `crowdsecurity/non-syslog`,
+  which ships inside a collection this one does not depend on). On top of that
+  every line arrives wrapped in the guest's console format,
+  `[   12.345678] caddy[480]: {...}`, which is no longer JSON.
+  `modules/crowdsec.nix` therefore ships one local parser
+  (`qt1/microvm-console`, via `localConfig.parsers.s00Raw`) that strips the
+  prefix — optionally, so a bare line works too — and sets those two fields.
+  Check it with `sudo cscli explain --log '<a line from journalctl -u
+  microvm@caddy>' --type caddy`: the chain should reach `s02-enrich` and then
+  list scenarios.
 - **The ban has to land on `FORWARD`, not just `INPUT`.** The WAN traffic
   this protects is never delivered to the host itself — it's `FORWARD`ed
   on to the caddy guest by `qt1.infra.microvmHost`'s NAT
