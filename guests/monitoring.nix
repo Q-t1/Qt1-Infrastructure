@@ -26,7 +26,7 @@
   proxyAddress,
 }:
 
-{ config, ... }:
+{ config, lib, ... }:
 
 let
   lokiPort = 3100;
@@ -80,7 +80,19 @@ in
     enable = true;
     configuration = {
       auth_enabled = false;
-      server.http_listen_port = lokiPort;
+      server = {
+        http_listen_port = lokiPort;
+        # Errors and warnings only. At info level loki logs several verbose
+        # metrics.go lines per query, and — because this guest mirrors its
+        # services' logs to the console, which the host journal captures and
+        # host-side Alloy ships straight back here — its own query logs would
+        # be ingested as log data. That path is bounded rather than runaway
+        # (ingesting generates no queries), but an auto-refreshing dashboard
+        # would otherwise keep feeding loki's chatter about itself into
+        # storage. Errors still reach the console, which is the only way to
+        # debug this guest at all: see the mirroring block at the end.
+        log_level = "warn";
+      };
       common = {
         path_prefix = "/var/lib/loki";
         storage.filesystem = {
@@ -197,8 +209,33 @@ in
       }
     ];
   };
-  systemd.services.grafana.serviceConfig.ImportCredential = [
-    "grafana-admin-password"
-    "grafana-secret-key"
+  systemd.services = lib.mkMerge [
+    {
+      grafana.serviceConfig.ImportCredential = [
+        "grafana-admin-password"
+        "grafana-secret-key"
+      ];
+    }
+
+    # Mirror all three services' own logs to the guest's serial console, the
+    # same way ./caddy.nix does and for the same reason: this guest exposes
+    # no SSH, and its root is a tmpfs, so its journal dies with it. Without
+    # this the host only ever sees systemd's "Started ..." lines — enough to
+    # know a unit was launched, useless for finding out why it then failed
+    # to serve. `journalctl -u microvm@monitoring` on the host is the only
+    # way to read these.
+    (lib.genAttrs
+      [
+        "loki"
+        "prometheus"
+        "grafana"
+      ]
+      (_: {
+        serviceConfig = {
+          StandardOutput = "journal+console";
+          StandardError = "journal+console";
+        };
+      })
+    )
   ];
 }
