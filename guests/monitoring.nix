@@ -118,6 +118,26 @@ in
     };
   };
 
+  # Give loki ownership of its data volume's root. microvm.nix creates each
+  # volume with mkfs, so the fresh ext4's root directory belongs to root —
+  # and loki runs unprivileged, so it cannot create the rules/, chunks/ and
+  # compactor/ subdirectories its config points at. It dies at startup, in a
+  # restart loop, with:
+  #
+  #   mkdir /var/lib/loki/rules: permission denied
+  #   error initialising module: ruler-storage
+  #
+  # Prometheus needs no equivalent because its own nixpkgs module declares
+  # StateDirectory, which systemd applies when the unit starts, i.e. after
+  # the volume is mounted. Loki's module declares neither that nor a
+  # tmpfiles rule, so this is ours to do. It must be tmpfiles (ordered after
+  # local-fs.target) rather than the module's users.users.loki.createHome,
+  # which cannot help: whatever it does to this path happens before the
+  # volume is mounted over it.
+  systemd.tmpfiles.rules = [
+    "d /var/lib/loki 0700 ${config.services.loki.user} ${config.services.loki.group} - -"
+  ];
+
   services.prometheus = {
     enable = true;
     port = prometheusPort;
