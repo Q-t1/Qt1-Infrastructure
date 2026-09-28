@@ -124,7 +124,7 @@ Caddy's own certificate and ACME account data live under `/var/lib/caddy`, a
 persistent volume, so a guest restart doesn't mean re-issuing a certificate
 (and burning into Let's Encrypt's rate limit) every time. There's no SSH into
 this guest — it's entirely declared here, nothing to run a CLI against — so
-its logs are mirrored to the serial console instead: `journalctl -u
+its logs go to the serial console instead: `journalctl -u
 microvm@caddy` on the host.
 
 ## headscale guest

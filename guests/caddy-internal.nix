@@ -104,12 +104,19 @@ in
     inherit (metrics) port from;
   };
 
-  # Mirror caddy's own output to this guest's serial console, exactly as
-  # ./caddy.nix does and for the same reason: no SSH, a tmpfs root, so its
-  # journal dies with it. Without this its access log (stdout, see logFormat
-  # below) never leaves the guest — not to `journalctl -u
-  # microvm@caddy-internal` on the host, not to Loki, and so not to the caddy
-  # dashboard's log panel either.
+  # Get caddy's output out of this guest and into the host's journal — no SSH,
+  # tmpfs root, so its own journal dies with it. Split exactly as ./caddy.nix
+  # splits it, and for the same reason: the JSON access log on stdout goes
+  # straight to the serial device so the lines stay verbatim (journald's
+  # console forwarding would prefix each one with `[   12.345678] caddy[480]:`
+  # and stop it being JSON), while stderr keeps the journald route for caddy's
+  # own diagnostics. /dev/ttyS0 is qemu's console here, the same device the
+  # kernel and serial-getty write to.
+  #
+  # Nothing parses these lines — CrowdSec only reads the WAN-facing guest —
+  # but Loki stores them and the caddy dashboard's log panel reads them, and
+  # that panel is worth a lot more when a line is a JSON object Grafana can
+  # expand than when it is a prefixed string.
   #
   # The volume is bounded by requests, and requests here are one person
   # browsing internal apps. Grafana's own auto-refresh does feed a few lines
@@ -117,7 +124,7 @@ in
   # a loop but a shrinking one: a handful of access lines per refresh, and
   # ingesting them generates no requests of its own.
   systemd.services.caddy.serviceConfig = {
-    StandardOutput = "journal+console";
+    StandardOutput = "file:/dev/ttyS0";
     StandardError = "journal+console";
   };
 

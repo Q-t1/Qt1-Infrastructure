@@ -55,8 +55,29 @@
     443
   ];
 
+  # Caddy's own output, out of this guest and into the host's journal — the
+  # only way anything leaves here (no SSH, tmpfs root). The two streams go by
+  # different routes on purpose:
+  #
+  #  - stdout, which carries nothing but the JSON access log (see logFormat
+  #    below), is written straight to the serial device. Not
+  #    `journal+console`: that route goes through journald's console
+  #    forwarding, which wraps every line as `[   12.345678] caddy[480]: ...`
+  #    — and a prefixed line is no longer JSON, so crowdsecurity/caddy-logs
+  #    rejects every single one. Measured on the running host before this
+  #    changed: 940 lines read, 940 unparsed, 0 parsed, i.e. CrowdSec could
+  #    never have banned anything. Writing to the device directly keeps the
+  #    lines verbatim, which also lets Loki and Grafana treat them as JSON.
+  #
+  #  - stderr keeps the journald route, prefix and all: it carries caddy's own
+  #    diagnostics (its default logger, pinned at ERROR), which a human reads
+  #    with `journalctl -u microvm@<guest>` and no parser ever sees.
+  #
+  # /dev/ttyS0 is qemu's console for this guest, the same device the kernel
+  # and serial-getty already write to. Reverting is a one-line change back to
+  # `journal+console`; the cost of that is CrowdSec going blind again.
   systemd.services.caddy.serviceConfig = {
-    StandardOutput = "journal+console";
+    StandardOutput = "file:/dev/ttyS0";
     StandardError = "journal+console";
   };
 
@@ -66,9 +87,10 @@
     virtualHosts.${hostname} = {
       # The access log, and the one thing that gives qt1.infra.crowdsec
       # (../modules/crowdsec.nix) something to read: to this guest's stdout,
-      # captured like everything else here (see
-      # systemd.services.caddy.serviceConfig above) — mirrored to the guest's
-      # console and from there to the host's journal.
+      # which goes verbatim to the serial console and from there to the host's
+      # journal (see systemd.services.caddy.serviceConfig above — stdout
+      # carries nothing but these lines, which is what lets it take that
+      # route).
       #
       # It has to be this option — the vhost's own logger — and not a `log`
       # directive in extraConfig below. A bare `log` points the access log at
