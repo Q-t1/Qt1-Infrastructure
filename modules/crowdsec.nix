@@ -20,6 +20,7 @@
 
 let
   cfg = config.qt1.infra.crowdsec;
+  host = config.qt1.infra.microvmHost;
   caddy = config.qt1.infra.guests.caddy;
 
   # Mirrors the same condition services.crowdsec-firewall-bouncer.settings.mode
@@ -50,6 +51,36 @@ in
         guest's mirrored console log) — add more only alongside a matching
         acquisition of your own (services.crowdsec.localConfig.acquisitions),
         or they're dead config that never sees any events.
+      '';
+    };
+
+    metricsFromGuests = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Serve CrowdSec's own Prometheus metrics to the guest bridge rather
+        than on loopback only — parser/bucket/scenario counters, LAPI request
+        counts per bouncer, and the number of currently active decisions
+        (bans) by scenario. Off by default: with it off the endpoint stays on
+        127.0.0.1, which is all `cscli metrics` needs.
+
+        Turned on by qt1.infra.guests.monitoring when it collects them, since
+        the Prometheus that scrapes them runs inside that guest while this
+        service runs on the host. The endpoint is unauthenticated (CrowdSec
+        has nothing to gate it with), which is why it is opened on the bridge
+        interface only — never the uplink, and nothing forwards a WAN port to
+        the host itself.
+      '';
+    };
+
+    metricsPort = lib.mkOption {
+      type = lib.types.port;
+      default = 6060;
+      readOnly = true;
+      description = ''
+        Port CrowdSec serves its Prometheus metrics on — its own default, and
+        the scrape target qt1.infra.guests.monitoring reads when
+        metricsFromGuests is set.
       '';
     };
   };
@@ -95,7 +126,33 @@ in
       # root:root 0755, so a file placed straight in it fails to write
       # with EACCES the first time crowdsec tries to create it.
       settings.lapi.credentialsFile = "/var/lib/crowdsec/state/local_api_credentials.yaml";
+
+      # Where CrowdSec serves its own Prometheus metrics. Upstream already
+      # enables that endpoint, at the "full" level which carries
+      # cs_active_decisions and the per-bouncer LAPI counters, but binds it to
+      # 127.0.0.1 — unreachable for the Prometheus that scrapes it, which runs
+      # inside the monitoring guest on the other side of the bridge. See
+      # metricsFromGuests, which qt1.infra.guests.monitoring sets.
+      #
+      # All interfaces rather than the bridge address, with the firewall rule
+      # below as the thing that actually scopes it — the same trade Grafana
+      # makes inside its own guest. Binding the bridge address would be a
+      # boot-order gamble this service cannot recover from: the host's
+      # networkd has wait-online disabled (it manages no uplink, see
+      # microvm-host.nix), so network-online.target doesn't wait for the
+      # bridge to get its address, and CrowdSec's metrics listener only logs
+      # "serving metrics" once and gives up if the bind fails — leaving the
+      # agent running with no metrics until someone restarts it.
+      settings.general.prometheus.listen_addr = lib.mkIf cfg.metricsFromGuests "0.0.0.0";
     };
+
+    # The one thing keeping that listener off the WAN: the port is opened on
+    # the bridge interface only, and the endpoint is unauthenticated (CrowdSec
+    # has nothing to gate it with). The host's firewall default-drops
+    # everywhere else, and nothing forwards a WAN port to the host itself.
+    networking.firewall.interfaces.${host.bridge}.allowedTCPPorts = lib.mkIf cfg.metricsFromGuests [
+      cfg.metricsPort
+    ];
 
     # Upstream declares crowdsec.service with plain ReadWritePaths for
     # rootDir (/var/lib/crowdsec), relying on systemd.tmpfiles.settings to

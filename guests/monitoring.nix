@@ -11,19 +11,29 @@
 # like every other guest here this one stays off the WAN by simply never
 # appearing in the host's networking.nat.forwardPorts.
 #
-# Collection itself happens on the HOST, alongside crowdsec.nix
+# Collection is mostly on the HOST, alongside crowdsec.nix
 # (../modules/guests/monitoring.nix): a host-side node_exporter this guest's
 # Prometheus scrapes over the bridge, host-side Grafana Alloy tailing the
-# host journal into this guest's Loki, and — when headscaleMetrics is on — a
-# host-side prometheus-tailscale-exporter reading headscale's tailnet
-# inventory out of its gRPC admin API. Nothing is collected from inside the
-# headscale/caddy guests themselves.
+# host journal into this guest's Loki, the host's own CrowdSec metrics
+# (crowdsecMetrics) and — when headscaleMetrics is on — a host-side
+# prometheus-tailscale-exporter reading headscale's tailnet inventory out of
+# its gRPC admin API. The one exception is caddyMetrics: each caddy guest
+# serves its own HTTP metrics on the bridge, for this guest only, since no
+# host-side collector can see the requests a proxy inside a VM handled.
+# Nothing is collected from inside the headscale guest.
 #
-# The one provisioned dashboard, ./dashboards/headscale/headscale-overview.json,
-# is revision 7 of grafana.com dashboard 24516 ("Headscale / Overview",
-# generated from the exporter's own tailscale-mixin), with a single edit: its
-# data source variable points at the Prometheus datasource's pinned uid
-# instead of the mixin's placeholder.
+# Dashboards are provisioned from ./dashboards, one directory (and one
+# provider) per topic, so a dashboard only exists when whatever feeds it is
+# actually collected:
+#
+#  - headscale/headscale-overview.json is revision 7 of grafana.com dashboard
+#    24516 ("Headscale / Overview", generated from the exporter's own
+#    tailscale-mixin), with a single edit: its data source variable points at
+#    the Prometheus datasource's pinned uid instead of the mixin's
+#    placeholder.
+#  - caddy/caddy-overview.json and crowdsec/crowdsec-overview.json are written
+#    for this repo rather than vendored, against the labels the scrape jobs
+#    below attach and the `unit` label host-side Alloy puts on journal logs.
 #
 # Built on ./base.nix; called with the hostname Grafana is served at and
 # caddy-internal's bridge address by the host-side module, since guests are
@@ -36,6 +46,14 @@
   # exporter (qt1.infra.guests.monitoring.headscaleMetrics), `{ }` otherwise
   # — it gates both the scrape job and the dashboard that reads it.
   headscaleExporter ? { },
+  # `[ { instance = "caddy"; target = "host:port"; } ... ]` — one entry per
+  # caddy guest serving its metrics on the bridge
+  # (qt1.infra.guests.monitoring.caddyMetrics), `[ ]` otherwise. `instance` is
+  # the guest's name, which is what the caddy dashboard's own variable lists.
+  caddyExporters ? [ ],
+  # `{ target = "host:port"; }` when the host's CrowdSec serves its metrics on
+  # the bridge (qt1.infra.guests.monitoring.crowdsecMetrics), `{ }` otherwise.
+  crowdsecExporter ? { },
 }:
 
 { config, lib, ... }:
@@ -178,6 +196,26 @@ in
         ];
       }
     ]
+    ++ lib.optional (caddyExporters != [ ]) {
+      # Both proxies in one job, told apart by the `instance` label rather
+      # than by job name: every panel in the caddy dashboard is written
+      # against one instance at a time, picked from a variable.
+      job_name = "caddy";
+      static_configs = map (exporter: {
+        targets = [ exporter.target ];
+        labels.instance = exporter.instance;
+      }) caddyExporters;
+    }
+    ++ lib.optional (crowdsecExporter != { }) {
+      job_name = "crowdsec";
+      static_configs = [
+        {
+          targets = [ crowdsecExporter.target ];
+          # CrowdSec runs on the host, like every other collector here.
+          labels.instance = "host";
+        }
+      ];
+    }
     ++ lib.optional (headscaleExporter != { }) {
       # The job name the upstream mixin selects on by default — the
       # dashboard's `job` variable is populated from it.
@@ -237,14 +275,18 @@ in
     # by name first turns that update into an insert. Reproduced and verified
     # against grafana 13.1.6.
     #
-    # Delete-then-insert runs on every start, but the uid below is pinned, so
-    # the datasource is recreated identically and anything referencing it by
-    # uid keeps working. The one casualty is a hand-made dashboard still
-    # pointing at the random uid grafana generated before this was pinned;
-    # repoint it at "prometheus" once.
+    # Delete-then-insert runs on every start, but the uids below are pinned,
+    # so each datasource is recreated identically and anything referencing it
+    # by uid keeps working. The one casualty is a hand-made dashboard still
+    # pointing at a random uid grafana generated before these were pinned;
+    # repoint it at "prometheus" or "loki" once.
     provision.datasources.settings.deleteDatasources = [
       {
         name = "Prometheus";
+        orgId = 1;
+      }
+      {
+        name = "Loki";
         orgId = 1;
       }
     ];
@@ -265,6 +307,9 @@ in
         type = "loki";
         access = "proxy";
         url = "http://127.0.0.1:${toString lokiPort}";
+        # Pinned for the same reason as Prometheus's above: the caddy and
+        # crowdsec dashboards each carry a logs panel naming this uid.
+        uid = "loki";
       }
     ];
     # Dashboards are provisioned from the store, one provider per topic
@@ -272,10 +317,19 @@ in
     # feeds it is actually being collected. They are read-only in the UI as a
     # result (Grafana reverts an edited provisioned dashboard on its next
     # scan); "Save as" a copy to modify one.
-    provision.dashboards.settings.providers = lib.optional (headscaleExporter != { }) {
-      name = "headscale";
-      options.path = ./dashboards/headscale;
-    };
+    provision.dashboards.settings.providers =
+      lib.optional (headscaleExporter != { }) {
+        name = "headscale";
+        options.path = ./dashboards/headscale;
+      }
+      ++ lib.optional (caddyExporters != [ ]) {
+        name = "caddy";
+        options.path = ./dashboards/caddy;
+      }
+      ++ lib.optional (crowdsecExporter != { }) {
+        name = "crowdsec";
+        options.path = ./dashboards/crowdsec;
+      };
   };
   systemd.services = lib.mkMerge [
     {

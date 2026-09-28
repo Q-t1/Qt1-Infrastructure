@@ -6,6 +6,11 @@
 # ../modules/guests/caddy.nix and headscale's own guest config
 # (../guests/headscale.nix).
 #
+# Its Prometheus metrics (request rates, latency histograms, in-flight
+# requests) are served on a port of their own, for the monitoring guest
+# alone, and only when it asks for them — see the `metrics` argument below
+# and qt1.infra.guests.caddy.metricsFromMonitoring.
+#
 # Stateful, unlike a "just forwards packets" guest: caddy's certificate and
 # ACME account data live on a persistent volume (/var/lib/caddy), so a
 # guest restart doesn't mean re-issuing a certificate (and burning into
@@ -24,9 +29,13 @@
   hostname,
   upstream,
   letsEncryptEmail,
+  # `{ port = <n>; from = "<address>"; }` when the monitoring guest scrapes
+  # this one (qt1.infra.guests.caddy.metricsFromMonitoring), `{ }` otherwise:
+  # it gates the whole metrics listener below, collection included.
+  metrics ? { },
 }:
 
-{ ... }:
+{ config, lib, ... }:
 
 {
   microvm = {
@@ -72,5 +81,44 @@
       # guest's console, and from there to the host's journal.
       log
     '';
+
+    # Prometheus metrics, when the monitoring guest collects them. Two halves:
+    #
+    #  - the global `metrics` option, which is what actually turns HTTP metrics
+    #    collection on (without it caddy 2.11 leaves them unregistered and the
+    #    endpoint below serves only Go/process metrics). `per_host` adds the
+    #    vhost as a label; caddy only labels hosts it has an explicit matcher
+    #    for and buckets everything else under `_other`, so an arbitrary Host
+    #    header off the WAN can't blow up the label cardinality.
+    #
+    #  - a site of its own for the endpoint, on a port of its own. Caddy
+    #    already serves /metrics on its admin API, but that API can also
+    #    rewrite caddy's whole configuration, so it stays on the guest's
+    #    loopback where upstream put it: this site exposes the metrics and
+    #    nothing else. Plain http:// with an explicit port, so automatic HTTPS
+    #    leaves it alone (no certificate for a bridge address, and nothing to
+    #    redirect).
+    #
+    #    The address in the site line becomes a Host matcher, not a bind
+    #    address — caddy still listens on :<port> on every interface — so what
+    #    actually keeps this endpoint to one caller is the firewall rule
+    #    below.
+    globalConfig = lib.mkIf (metrics != { }) ''
+      metrics {
+        per_host
+      }
+    '';
+    extraConfig = lib.mkIf (metrics != { }) ''
+      http://${config.qt1.guest.address}:${toString metrics.port} {
+        metrics
+      }
+    '';
+  };
+
+  # What scopes the metrics listener above: the monitoring guest's address
+  # only, not the rest of the bridge, and never the WAN — this port has no
+  # forwardPorts entry on the host.
+  qt1.guest.allowedTCPPortsFrom = lib.optional (metrics != { }) {
+    inherit (metrics) port from;
   };
 }
