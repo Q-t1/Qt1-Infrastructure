@@ -1,6 +1,6 @@
 # Minimal NixOS host used only to evaluate/build the infra layer on its own,
 # with no consumer flake involved. Nothing here is deployed.
-{ config, ... }:
+{ ... }:
 {
   qt1.infra.microvmHost = {
     enable = true;
@@ -17,12 +17,11 @@
     letsEncryptEmail = "you@example.com";
   };
   qt1.infra.crowdsec.enable = true;
+  qt1.infra.guests.caddyInternal.enable = true;
   qt1.infra.guests.monitoring.enable = true;
-  qt1.infra.tailscaleClient = {
-    enable = true;
-    loginServerUrl = config.qt1.infra.guests.headscale.serverUrl;
-    authKeyFile = config.qt1.infra.guests.headscale.tailscaleAuthKeyFile;
-  };
+  # loginServerUrl/authKeyFile/loginServerAddress default to the
+  # headscale/caddy guests' own values.
+  qt1.infra.tailscaleClient.enable = true;
 
   # Enough of a machine for `system.build.toplevel` to evaluate.
   boot.loader.grub.devices = [ "/dev/vda" ];

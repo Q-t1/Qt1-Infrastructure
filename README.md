@@ -12,12 +12,16 @@ inputs and builds on its own, and devSystem consumes it as a flake input.
 
 ```
 flake.nix                        nixosModules.default, standalone test host, checks
+lib.nix                          helpers for the host-side guest modules
 modules/microvm-host.nix         guest bridge + NAT           (qt1.infra.microvmHost)
 modules/tailscale-client.nix     join the tailnet             (qt1.infra.tailscaleClient)
+guests/base.nix                  what every guest shares      (qt1.guest)
 modules/guests/headscale.nix     host-side VM declaration     (qt1.infra.guests.headscale)
 guests/headscale.nix             the guest's own NixOS config
 modules/guests/caddy.nix         host-side VM declaration     (qt1.infra.guests.caddy)
 guests/caddy.nix                 the guest's own NixOS config
+modules/guests/caddy-internal.nix host-side VM declaration    (qt1.infra.guests.caddyInternal)
+guests/caddy-internal.nix        the guest's own NixOS config
 modules/crowdsec.nix             host-side CrowdSec + bouncer (qt1.infra.crowdsec)
 modules/guests/monitoring.nix    host-side VM + collection    (qt1.infra.guests.monitoring)
 guests/monitoring.nix            the guest's own NixOS config
@@ -66,7 +70,8 @@ qt1.infra = {
     letsEncryptEmail = "you@example.com";
   };
   crowdsec.enable = true;   # optional: bans offenders against caddy's logs
-  guests.monitoring.enable = true;   # optional: Loki+Prometheus+Grafana, tailnet-only
+  guests.caddyInternal.enable = true;   # optional: tailnet-only proxy for internal apps
+  guests.monitoring.enable = true;   # optional: Loki+Prometheus+Grafana, behind caddyInternal
 };
 ```
 
@@ -173,35 +178,30 @@ re-register against a fresh instance.
 ## Joining the tailnet (`qt1.infra.tailscaleClient`)
 
 Any machine — the bare host or a guest — can join the tailnet this repo's own
-headscale coordinates, via `qt1.infra.tailscaleClient`:
+headscale coordinates, via `qt1.infra.tailscaleClient`. **On the host running
+the headscale/caddy guests, enabling it is all it takes:**
 
 ```nix
-qt1.infra.tailscaleClient = {
-  enable = true;
-  loginServerUrl = config.qt1.infra.guests.headscale.serverUrl;
-  authKeyFile = config.qt1.infra.guests.headscale.tailscaleAuthKeyFile;
-  # ephemeral = true;   # set for machines with non-persistent state
-};
+qt1.infra.tailscaleClient.enable = true;
 ```
 
-**For anything already on the guest bridge — the host, or another guest —
-also add a `networking.hosts` entry pointing `serverUrl`'s hostname at the
-*caddy* guest's own bridge address** (caddy holds the TLS certificate now,
-not headscale — see the caddy guest section above):
+Its settings default to those guests' own values:
 
-```nix
-networking.hosts.${config.qt1.infra.guests.caddy.address} = [
-  config.qt1.infra.guests.headscale.tlsHostname
-];
-```
+- `loginServerUrl`: headscale's `serverUrl`.
+- `authKeyFile`: the shared pre-auth key (see below).
+- `loginServerAddress`: the **caddy** guest's bridge address. `serverUrl`'s
+  hostname is resolved to it via `networking.hosts`, so the host reaches
+  headscale straight over the bridge instead of out through the WAN and back
+  in via the router's port forward (NAT hairpinning, which not every router
+  supports reliably). The TLS handshake still validates, since caddy's
+  certificate is for the hostname, not the IP.
 
-This resolves the same public hostname straight to the bridge instead of out
-through the WAN and back in via the router's port forward (NAT hairpinning,
-which not every router supports reliably) — the TLS handshake still
-validates correctly, since the certificate is for the hostname, not whichever
-IP you actually connected to. Skip this for a genuinely external Tailscale
-client (a phone, a laptop away from home); it has no bridge to shortcut
-through and just uses `serverUrl` over the WAN normally.
+A guest joins with `tailnet = true` in its `mkGuest` call (see "Adding a
+guest"), which sets all of the above inside the guest. It also gives the
+guest a stable node: named after the VM, not ephemeral, with tailscaled's
+state on a persistent volume. A genuinely external Tailscale client (a
+phone, a laptop away from home) has no bridge to shortcut through and just
+uses `serverUrl` over the WAN.
 
 **No manual step here, unlike the guest's own secrets above — including the
 pre-auth key itself.** Minting one normally requires headscale already
@@ -267,6 +267,66 @@ setting `services.crowdsec.settings.capi.credentialsFile` yourself; it's
 left out here deliberately, since the upstream module's auto-registration
 script has a rough edge that can fail a restart after the first run.
 
+## caddy-internal guest (`qt1.infra.guests.caddyInternal`)
+
+Optional, off by default. The tailnet-only counterpart of the caddy guest
+above: one [Caddy](https://caddyserver.com) reverse proxy (`10.100.0.5`) in
+front of every *internal* app, each served at its own MagicDNS name,
+`http://<label>.<baseDomain>/`:
+
+```nix
+qt1.infra.guests.caddyInternal = {
+  enable = true;
+  # Guests register their own entry (monitoring adds `grafana`); add others
+  # by hand as `label = "upstream-host:port"`.
+  virtualHosts.myapp = "10.100.0.9:8080";
+};
+# -> http://myapp.<baseDomain>/, listed in qt1.infra.guests.caddyInternal.urls
+```
+
+Requires `guests.headscale` and `guests.caddy` (for the same NAT-hairpin
+shortcut described in "Joining the tailnet").
+
+It is kept separate from the WAN-facing caddy on purpose. That one is
+port-forwarded from the internet; this one never is. So no vhost mistake
+here can publish an internal app, and a compromise of the public proxy
+doesn't hand over a tailnet node.
+
+How it fits together:
+
+- **This guest is the tailnet node, the apps aren't.** It joins the tailnet
+  as node `caddy-internal` (`tailnet = true`, see "Joining the tailnet"),
+  with its tailscaled state on a small persistent volume
+  (`/var/lib/tailscale`) and not ephemeral. A restart therefore keeps the
+  same node and the same tailnet addresses.
+- **Names**: for each vhost, headscale serves `<label>.<baseDomain>` as an
+  extra DNS record (A + AAAA) pointing at that node's tailnet addresses —
+  `qt1.infra.guests.headscale.magicDnsAliases`, which this module fills in.
+  Node addresses are assigned by headscale at registration, so they can't be
+  written at build time: `headscale-magicdns-aliases`, a one-minute timer
+  inside the headscale guest, looks them up with `headscale nodes list` and
+  rewrites `/var/lib/headscale/extra-records.json` (`dns.extra_records_path`)
+  when they change; headscale reloads that file by itself.
+- **Reachability**: Caddy listens on port 80, opened only on this guest's
+  `tailscale0`. It proxies only the declared hostnames; any other `Host`
+  (`caddy-internal.<baseDomain>`, the node's tailnet IP, …) gets its
+  connection closed. Upstreams are reached over the bridge, and each app's
+  guest opens its port to this guest's bridge address only.
+- **Plain HTTP**: headscale can't issue certificates for MagicDNS names
+  (there's no `tailscale cert` equivalent), and WireGuard already encrypts
+  the traffic end to end.
+
+Clients need MagicDNS on to resolve the names (the default: `tailscale up`
+accepts the tailnet's DNS unless `--accept-dns=false`). The node must
+register as exactly `caddy-internal`: if headscale already knows a node by
+that name, the new one gets a suffixed name and the aliases resolve to
+nothing. Check and fix it on the headscale guest:
+
+```
+headscale nodes list
+headscale nodes rename -i <id> caddy-internal   # after deleting the stale one
+```
+
 ## monitoring guest (`qt1.infra.guests.monitoring`)
 
 Optional, off by default. Bundles [Loki](https://grafana.com/oss/loki/),
@@ -279,7 +339,7 @@ this one Grafana instance:
 qt1.infra.guests.monitoring.enable = true;
 ```
 
-Requires both `guests.headscale` and `guests.caddy` (see below for why).
+Requires `guests.caddyInternal`, its only way in (see below).
 **Collection itself happens on the host**, alongside `qt1.infra.crowdsec`,
 not inside this guest:
 
@@ -300,30 +360,27 @@ not inside this guest:
 Both Loki and Prometheus default to 30 days' retention, sized against the
 guest's own volumes (`/var/lib/loki` 8G, `/var/lib/prometheus2` 4G).
 
-**Reachable only over the tailnet — this is the actual point of the guest.**
-Three things enforce that, stacked:
+**Reachable only over the tailnet, at its MagicDNS alias only — this is the
+actual point of the guest.** Grafana is served at exactly one URL,
+`http://grafana.<baseDomain>/` (label: `grafanaLabel`; also exposed
+read-only as `qt1.infra.guests.monitoring.grafanaUrl`), through the
+caddy-internal guest above. This guest registers that vhost there itself and
+never joins the tailnet. Four things enforce it, stacked:
 
 1. Like every other guest here, it never appears in the host's
-   `networking.nat.forwardPorts` — structurally unreachable from the WAN.
-2. Grafana's port (3000) is opened only on the guest's own `tailscale0`
-   interface, not the bridge — so even another guest on `10.100.0.0/24`
-   can't reach it, only tailnet peers.
-3. Loki's push port (3100) is opened on the bridge, but source-restricted to
-   the host's own address only (the same `iptables`-source-IP trick the
-   headscale guest uses to scope its SSH) — nothing else on the bridge can
-   reach it either.
+   `networking.nat.forwardPorts`, so it can't be reached from the WAN at all.
+2. Grafana's port (3000) is opened on the bridge for caddy-internal's
+   address only (the same `iptables`-source-IP trick the headscale guest
+   uses to scope its SSH). The host and the other guests can't reach it.
+3. caddy-internal itself is reachable only from tailnet peers, and only
+   proxies requests for `grafana.<baseDomain>`. Grafana's own
+   `enforce_domain` redirects any other `Host` back to that name.
+4. Loki's push port (3100) is opened on the bridge, but source-restricted to
+   the host's own address only — nothing else on the bridge can reach it
+   either.
 
-This guest joins the tailnet itself (`qt1.infra.tailscaleClient`, using the
-same shared pre-auth key every other consumer does — see "Joining the
-tailnet" above) as its *only* route in, which is also why it needs
-`guests.caddy`: the NAT-hairpin shortcut described there
-(`networking.hosts` pointing headscale's hostname at caddy's bridge address)
-is baked into `guests/monitoring.nix` directly, not left as a manual step.
-
-Once tailnet-joined yourself, reach it at `http://monitoring.<baseDomain>:3000`
-(MagicDNS; `baseDomain` is `qt1.infra.guests.headscale.baseDomain`). Grafana's
-initial admin password is host-generated, unattended, the same pattern as
-every other secret in this repo:
+Grafana's initial admin password is host-generated, unattended, the same
+pattern as every other secret in this repo:
 
 ```
 sudo cat /var/lib/microvms/monitoring/grafana-admin-password
@@ -337,11 +394,28 @@ you, or accept starting fresh.
 
 ## Adding a guest
 
-1. `guests/<name>.nix` — the guest's NixOS config, as a function of its network
-   coordinates (see `guests/headscale.nix`). microvm.nix evaluates guests in
-   a nested `nixosSystem` that receives none of the host's specialArgs, so pass
-   anything it needs explicitly.
-2. `modules/guests/<name>.nix` — `qt1.infra.guests.<name>` options and the
-   `microvm.vms.<name>` declaration.
-3. Add it to `nixosModules.microvmHost`'s imports in `flake.nix`, give it an
-   address and a MAC, and enable it in `checks/test-host.nix`.
+Every guest is built from the same pieces, so a new one is mostly its own
+service config:
+
+1. `guests/<name>.nix` — the guest's own NixOS module, a function of only
+   what's specific to it (see `guests/caddy-internal.nix`). The common base
+   (`guests/base.nix`) is imported for it: qemu microVM, tap interface
+   `vm-<name>`, static address on the bridge via networkd, fw_cfg
+   credentials, public resolvers, `system.stateVersion`. Its network
+   coordinates are under `config.qt1.guest`, and
+   `qt1.guest.allowedTCPPortsFrom = [ { port; from; } ]` opens a port to a
+   single bridge address. microvm.nix evaluates guests in a nested
+   `nixosSystem` that receives none of the host's specialArgs, so anything
+   else it needs is passed in explicitly.
+2. `modules/guests/<name>.nix` — the host side, using `lib.nix`:
+   - `options.qt1.infra.guests.<name> = infraLib.guestOptions { index; description; } // { … }`
+     gives `enable`, plus `address` (`10.100.0.<index>`) and `mac`.
+   - `infraLib.mkGuest config { name; cfg; module; credentialFiles; tailnet; }`
+     declares `microvm.vms.<name>` with the base module and the host
+     assertions. `tailnet = true` joins the tailnet (see "Joining the
+     tailnet").
+   - `infraLib.provisionSecrets { vm; description; path; secrets; }` creates
+     host-generated secrets before the VM starts.
+   - A web UI goes on caddy-internal: `qt1.infra.guests.caddyInternal.virtualHosts.<label> = "<address>:<port>"`.
+3. Add it to `nixosModules.microvmHost`'s imports in `flake.nix` and enable
+   it in `checks/test-host.nix`.

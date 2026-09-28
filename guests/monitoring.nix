@@ -3,11 +3,13 @@
 # three is independently useful here — they exist purely to back this one
 # Grafana instance.
 #
-# Reachable only over the tailnet: this guest joins it itself
-# (qt1.infra.tailscaleClient), and Grafana's port is opened only on the
-# tailscale0 interface below — never the guest bridge, never (transitively)
-# the WAN, the same way every other guest here stays off the WAN by simply
-# never appearing in the host's networking.nat.forwardPorts.
+# Reachable only over the tailnet, and only at its MagicDNS alias
+# (http://grafana.<baseDomain>/ by default), through the caddy-internal
+# guest (./caddy-internal.nix): that proxy is the tailnet node, this guest
+# never joins the tailnet itself. Grafana's port is opened on the bridge for
+# caddy-internal's address only — not the host, not the other guests — and
+# like every other guest here this one stays off the WAN by simply never
+# appearing in the host's networking.nat.forwardPorts.
 #
 # Collection itself happens on the HOST, alongside crowdsec.nix
 # (../modules/guests/monitoring.nix): a host-side node_exporter this guest's
@@ -15,22 +17,16 @@
 # host journal into this guest's Loki. Nothing is collected from inside the
 # headscale/caddy guests in this pass.
 #
-# Called with its network coordinates, the tailnet it joins, and caddy's own
-# bridge address/hostname (for the NAT-hairpin shortcut below) by the
-# host-side module; guests are evaluated by microvm.nix in a nested
-# nixosSystem that gets none of the host's specialArgs, so they are passed in
-# explicitly rather than read from the enclosing config.
+# Built on ./base.nix; called with the hostname Grafana is served at and
+# caddy-internal's bridge address by the host-side module, since guests are
+# evaluated by microvm.nix in a nested nixosSystem that gets none of the
+# host's specialArgs.
 {
-  address,
-  mac,
-  gateway,
-  prefixLength,
-  loginServerUrl,
-  caddyAddress,
-  tlsHostname,
+  grafanaHostname,
+  proxyAddress,
 }:
 
-{ lib, ... }:
+{ config, ... }:
 
 let
   lokiPort = 3100;
@@ -39,19 +35,10 @@ let
   nodeExporterPort = 9100;
 in
 {
-  imports = [ ../modules/tailscale-client.nix ];
 
   microvm = {
-    hypervisor = "qemu";
     vcpu = 2;
     mem = 1536;
-    interfaces = [
-      {
-        type = "tap";
-        id = "vm-monitoring";
-        inherit mac;
-      }
-    ];
     volumes = [
       {
         image = "loki-data.img";
@@ -72,57 +59,22 @@ in
     ];
   };
 
-  boot.initrd.kernelModules = [ "qemu_fw_cfg" ];
-
-  networking = {
-    hostName = "monitoring";
-    useNetworkd = true;
-    useDHCP = false;
-    nameservers = [
-      "1.1.1.1"
-      "8.8.8.8"
-    ];
-    # See the README's "Joining the tailnet" section: this resolves
-    # headscale's public hostname straight to caddy's bridge address instead
-    # of round-tripping out through the WAN and back in via the router's NAT
-    # (hairpinning, which not every router supports), for this guest's own
-    # tailscale-autoconnect run below.
-    hosts.${caddyAddress} = [ tlsHostname ];
-    firewall = {
-      # Loki's push API: bridge-reachable, but only from the host itself
-      # (the only Promtail-equivalent, Grafana Alloy, runs there) — not from
-      # other guests on the bridge. extraCommands runs before the firewall's
-      # default-drop rule, the same trick guests/headscale.nix uses to scope
-      # its own SSH to the host only.
-      extraCommands = ''
-        iptables -A nixos-fw -p tcp --dport ${toString lokiPort} -s ${gateway} -j nixos-fw-accept
-      '';
-      # Grafana itself: tailnet-only, not bridge-reachable at all — this is
-      # the actual "reachable only from the headscale net" enforcement,
-      # alongside this guest never appearing in the host's
-      # networking.nat.forwardPorts (see modules/guests/monitoring.nix).
-      interfaces.tailscale0.allowedTCPPorts = [ grafanaPort ];
-    };
-  };
-  systemd.network.networks."10-uplink" = {
-    matchConfig.MACAddress = mac;
-    address = [ "${address}/${toString prefixLength}" ];
-    gateway = [ gateway ];
-  };
-
-  qt1.infra.tailscaleClient = {
-    enable = true;
-    inherit loginServerUrl;
-    authKeyFile = "/run/credentials/tailscale-autoconnect.service/tailscale-authkey";
-    # tmpfs root — same reasoning as every other guest here: without this,
-    # every VM restart would register as a new tailnet node.
-    ephemeral = true;
-  };
-  # tailscale-client.nix declares the credential path above but not the
-  # import itself — mirrors sshd.serviceConfig.ImportCredential in
-  # guests/headscale.nix, importing the fw_cfg credential this guest's own
-  # host module hands in via microvm.credentialFiles.tailscale-authkey.
-  systemd.services.tailscale-autoconnect.serviceConfig.ImportCredential = [ "tailscale-authkey" ];
+  qt1.guest.allowedTCPPortsFrom = [
+    # Loki's push API: only from the host itself (the only
+    # Promtail-equivalent, Grafana Alloy, runs there) — not from other
+    # guests on the bridge.
+    {
+      port = lokiPort;
+      from = config.qt1.guest.gateway;
+    }
+    # Grafana: only from caddy-internal — its one way in, and the actual
+    # "reachable only from the headscale net" enforcement, alongside this
+    # guest never appearing in the host's networking.nat.forwardPorts.
+    {
+      port = grafanaPort;
+      from = proxyAddress;
+    }
+  ];
 
   services.loki = {
     enable = true;
@@ -176,7 +128,7 @@ in
         job_name = "node";
         static_configs = [
           {
-            targets = [ "${gateway}:${toString nodeExporterPort}" ];
+            targets = [ "${config.qt1.guest.gateway}:${toString nodeExporterPort}" ];
             labels.instance = "host";
           }
         ];
@@ -188,15 +140,22 @@ in
     enable = true;
     settings = {
       server = {
+        # All interfaces (the bridge address may not be up yet when Grafana
+        # starts); the firewall above admits caddy-internal only.
         http_addr = "0.0.0.0";
         http_port = grafanaPort;
+        domain = grafanaHostname;
+        root_url = "http://${grafanaHostname}/";
+        # Redirects any request whose Host isn't the MagicDNS alias back to
+        # it — a second layer behind caddy-internal's own Host matching (and
+        # DNS rebinding protection).
+        enforce_domain = true;
       };
       security = {
         # Both require the file provider in this nixpkgs version — a plain
         # string here would land in the world-readable Nix store, and
         # secret_key has no default at all (hard assertion failure if
-        # unset). Both files are host-generated, unattended, the same
-        # pattern as the tailscale authkey above — see
+        # unset). Both files are host-generated, unattended — see
         # ../modules/guests/monitoring.nix's monitoring-provision-secrets.
         admin_password = "$__file{/run/credentials/grafana.service/grafana-admin-password}";
         secret_key = "$__file{/run/credentials/grafana.service/grafana-secret-key}";
@@ -222,6 +181,4 @@ in
     "grafana-admin-password"
     "grafana-secret-key"
   ];
-
-  system.stateVersion = "26.05";
 }

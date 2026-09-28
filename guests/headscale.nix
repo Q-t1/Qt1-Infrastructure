@@ -27,36 +27,37 @@
 # host-generated key for headscale-mint-tailscale-authkey to run unattended
 # (see ../modules/guests/headscale.nix).
 #
-# Called with its network coordinates and public hostname by the host-side
-# module; guests are evaluated by microvm.nix in a nested nixosSystem that
-# gets none of the host's specialArgs, so they are passed in explicitly
-# rather than read from the enclosing config.
+# Built on ./base.nix (network coordinates under config.qt1.guest); called
+# with its public identity and SSH keys by the host-side module, since guests
+# are evaluated by microvm.nix in a nested nixosSystem that gets none of the
+# host's specialArgs.
 {
-  address,
-  mac,
-  gateway,
-  prefixLength,
   serverUrl,
   baseDomain,
   internalPort,
   adminSshKeys,
+  magicDnsAliases,
 }:
 
-{ lib, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
+
+let
+  # Watched by headscale itself (dns.extra_records_path), which reloads it on
+  # every change — no restart needed when an alias's target moves.
+  extraRecordsFile = "/var/lib/headscale/extra-records.json";
+  hasAliases = magicDnsAliases != { };
+  inherit (import ../lib.nix { inherit lib; }) publicResolvers;
+in
 
 {
   microvm = {
-    # credentialFiles is only implemented by the qemu runner.
-    hypervisor = "qemu";
     vcpu = 2;
     mem = 512;
-    interfaces = [
-      {
-        type = "tap";
-        id = "vm-headscale";
-        inherit mac;
-      }
-    ];
     volumes = [
       {
         image = "headscale-data.img";
@@ -66,36 +67,18 @@
     ];
   };
 
-  # Credentials (the SSH host key and the automation pubkey) arrive over
-  # qemu's fw_cfg; its sysfs interface is a module, so load it early enough
-  # for systemd to import them at boot.
-  boot.initrd.kernelModules = [ "qemu_fw_cfg" ];
-
-  networking = {
-    useNetworkd = true;
-    useDHCP = false;
-    nameservers = [
-      "1.1.1.1"
-      "8.8.8.8"
-    ];
-    firewall = {
-      # Only the plain-HTTP port caddy proxies to — bridge-only, since this
-      # guest is never in the host's forwardPorts.
-      allowedTCPPorts = [ internalPort ];
-      # SSH (admin access, for one-off `headscale` CLI commands) is not in
-      # allowedTCPPorts: it must only be reachable from the host, not from
-      # other guests on the bridge. extraCommands runs before the
-      # firewall's default-drop rule, so this is the only way in on port 22.
-      extraCommands = ''
-        iptables -A nixos-fw -p tcp --dport 22 -s ${gateway} -j nixos-fw-accept
-      '';
-    };
-  };
-  systemd.network.networks."10-uplink" = {
-    matchConfig.MACAddress = mac;
-    address = [ "${address}/${toString prefixLength}" ];
-    gateway = [ gateway ];
-  };
+  # Only the plain-HTTP port caddy proxies to — bridge-only, since this
+  # guest is never in the host's forwardPorts.
+  networking.firewall.allowedTCPPorts = [ internalPort ];
+  # SSH (admin access, for one-off `headscale` CLI commands) is not in
+  # allowedTCPPorts: it must only be reachable from the host, not from other
+  # guests on the bridge.
+  qt1.guest.allowedTCPPortsFrom = [
+    {
+      port = 22;
+      from = config.qt1.guest.gateway;
+    }
+  ];
 
   services.openssh = {
     enable = true;
@@ -138,16 +121,79 @@
       # what's reachable from the outside.
       server_url = serverUrl;
       dns = {
+        # The module's default already, pinned since caddy-internal's apps
+        # are only served at MagicDNS names (see magicDnsAliases below).
+        magic_dns = true;
         base_domain = baseDomain;
+        extra_records_path = lib.mkIf hasAliases extraRecordsFile;
         # MagicDNS clients use this as their sole resolver, so it must be
         # able to resolve the public internet too, not just the tailnet.
-        nameservers.global = [
-          "1.1.1.1"
-          "8.8.8.8"
-        ];
+        nameservers.global = publicResolvers;
       };
     };
   };
 
-  system.stateVersion = "26.05";
+  # magicDnsAliases: publish each alias fqdn as A/AAAA records pointing at
+  # the named node's current tailnet addresses. headscale refuses to start
+  # if extra_records_path doesn't exist yet, so seed it empty first; after
+  # that, headscale-magicdns-aliases rewrites it (only when it changes)
+  # whenever it runs, and headscale picks the change up by itself.
+  systemd.services.headscale.serviceConfig.ExecStartPre = lib.mkIf hasAliases [
+    "${pkgs.writeShellScript "headscale-seed-extra-records" ''
+      [ -e ${extraRecordsFile} ] || echo '[]' > ${extraRecordsFile}
+    ''}"
+  ];
+  systemd.services.headscale-magicdns-aliases = lib.mkIf hasAliases {
+    description = "Point headscale's MagicDNS alias records at their nodes' current addresses";
+    after = [ "headscale.service" ];
+    requires = [ "headscale.service" ];
+    wantedBy = [ "multi-user.target" ];
+    path = [
+      config.services.headscale.package
+      pkgs.jq
+      pkgs.diffutils
+    ];
+    serviceConfig = {
+      Type = "oneshot";
+      # Same user as headscale: owns extraRecordsFile, and is in the group
+      # allowed on the CLI's unix socket.
+      User = config.services.headscale.user;
+      Group = config.services.headscale.group;
+      # Right after boot headscale's CLI socket may not be up yet.
+      Restart = "on-failure";
+      RestartSec = "10s";
+    };
+    script = ''
+      set -euo pipefail
+
+      new=$(mktemp)
+      trap 'rm -f "$new"' EXIT
+
+      # A node that isn't registered (yet) simply contributes no records.
+      headscale nodes list -o json \
+        | jq --argjson aliases ${lib.escapeShellArg (builtins.toJSON magicDnsAliases)} '
+            (. // []) as $nodes
+            | [ $aliases | to_entries[] as $a
+                | $nodes[] | select(.given_name == $a.value)
+                | .ip_addresses[]
+                | { name: $a.key, type: (if contains(":") then "AAAA" else "A" end), value: . } ]
+          ' > "$new"
+
+      # Rewritten in place (not renamed over) and only on change: headscale
+      # watches this exact file.
+      if ! cmp -s "$new" ${extraRecordsFile}; then
+        cat "$new" > ${extraRecordsFile}
+      fi
+    '';
+  };
+  # Addresses only change when a node re-registers; polling keeps that
+  # (and a node joining after headscale started) covered without a hook
+  # into headscale itself.
+  systemd.timers.headscale-magicdns-aliases = lib.mkIf hasAliases {
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnBootSec = "1min";
+      OnUnitActiveSec = "1min";
+    };
+  };
 }
