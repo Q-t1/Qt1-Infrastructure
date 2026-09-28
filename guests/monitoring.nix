@@ -26,7 +26,7 @@
   proxyAddress,
 }:
 
-{ config, ... }:
+{ config, lib, ... }:
 
 let
   lokiPort = 3100;
@@ -80,7 +80,19 @@ in
     enable = true;
     configuration = {
       auth_enabled = false;
-      server.http_listen_port = lokiPort;
+      server = {
+        http_listen_port = lokiPort;
+        # Errors and warnings only. At info level loki logs several verbose
+        # metrics.go lines per query, and — because this guest mirrors its
+        # services' logs to the console, which the host journal captures and
+        # host-side Alloy ships straight back here — its own query logs would
+        # be ingested as log data. That path is bounded rather than runaway
+        # (ingesting generates no queries), but an auto-refreshing dashboard
+        # would otherwise keep feeding loki's chatter about itself into
+        # storage. Errors still reach the console, which is the only way to
+        # debug this guest at all: see the mirroring block at the end.
+        log_level = "warn";
+      };
       common = {
         path_prefix = "/var/lib/loki";
         storage.filesystem = {
@@ -118,6 +130,26 @@ in
     };
   };
 
+  # Give loki ownership of its data volume's root. microvm.nix creates each
+  # volume with mkfs, so the fresh ext4's root directory belongs to root —
+  # and loki runs unprivileged, so it cannot create the rules/, chunks/ and
+  # compactor/ subdirectories its config points at. It dies at startup, in a
+  # restart loop, with:
+  #
+  #   mkdir /var/lib/loki/rules: permission denied
+  #   error initialising module: ruler-storage
+  #
+  # Prometheus needs no equivalent because its own nixpkgs module declares
+  # StateDirectory, which systemd applies when the unit starts, i.e. after
+  # the volume is mounted. Loki's module declares neither that nor a
+  # tmpfiles rule, so this is ours to do. It must be tmpfiles (ordered after
+  # local-fs.target) rather than the module's users.users.loki.createHome,
+  # which cannot help: whatever it does to this path happens before the
+  # volume is mounted over it.
+  systemd.tmpfiles.rules = [
+    "d /var/lib/loki 0700 ${config.services.loki.user} ${config.services.loki.group} - -"
+  ];
+
   services.prometheus = {
     enable = true;
     port = prometheusPort;
@@ -145,7 +177,11 @@ in
         http_addr = "0.0.0.0";
         http_port = grafanaPort;
         domain = grafanaHostname;
-        root_url = "http://${grafanaHostname}/";
+        # https, terminated by caddy-internal with a local-CA certificate;
+        # grafana itself stays plain HTTP on the bridge behind it. Getting
+        # this scheme wrong makes grafana hand out http:// redirects and
+        # asset URLs, which the browser then blocks as mixed content.
+        root_url = "https://${grafanaHostname}/";
         # Redirects any request whose Host isn't the MagicDNS alias back to
         # it — a second layer behind caddy-internal's own Host matching (and
         # DNS rebinding protection).
@@ -177,8 +213,33 @@ in
       }
     ];
   };
-  systemd.services.grafana.serviceConfig.ImportCredential = [
-    "grafana-admin-password"
-    "grafana-secret-key"
+  systemd.services = lib.mkMerge [
+    {
+      grafana.serviceConfig.ImportCredential = [
+        "grafana-admin-password"
+        "grafana-secret-key"
+      ];
+    }
+
+    # Mirror all three services' own logs to the guest's serial console, the
+    # same way ./caddy.nix does and for the same reason: this guest exposes
+    # no SSH, and its root is a tmpfs, so its journal dies with it. Without
+    # this the host only ever sees systemd's "Started ..." lines — enough to
+    # know a unit was launched, useless for finding out why it then failed
+    # to serve. `journalctl -u microvm@monitoring` on the host is the only
+    # way to read these.
+    (lib.genAttrs
+      [
+        "loki"
+        "prometheus"
+        "grafana"
+      ]
+      (_: {
+        serviceConfig = {
+          StandardOutput = "journal+console";
+          StandardError = "journal+console";
+        };
+      })
+    )
   ];
 }

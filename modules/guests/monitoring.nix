@@ -41,7 +41,7 @@ in
 
       grafanaUrl = lib.mkOption {
         type = lib.types.str;
-        default = "http://${cfg.grafanaLabel}.${headscale.baseDomain}/";
+        default = "https://${cfg.grafanaLabel}.${headscale.baseDomain}/";
         readOnly = true;
         description = ''
           The one URL Grafana answers at, over the tailnet only: its MagicDNS

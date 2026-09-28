@@ -27,18 +27,32 @@ in
         };
         description = ''
           Internal apps to serve, as `label = "upstream-host:port"`. Each is
-          reachable over the tailnet only, at `http://<label>.<baseDomain>/`
-          (qt1.infra.guests.headscale.baseDomain). Guests set their own entry
-          here (see modules/guests/monitoring.nix), and open their port to
-          this guest's `address` only.
+          reachable over the tailnet only, at `https://<label>.<baseDomain>/`
+          (qt1.infra.guests.headscale.baseDomain), behind a certificate from
+          caddy's own local CA — whose root must be installed on each client
+          device, see ../../guests/caddy-internal.nix. Guests set their own
+          entry here (see modules/guests/monitoring.nix), and open their port
+          to this guest's `address` only.
         '';
       };
 
       urls = lib.mkOption {
         type = lib.types.attrsOf lib.types.str;
-        default = lib.mapAttrs (label: _: "http://${label}.${headscale.baseDomain}/") cfg.virtualHosts;
+        default = lib.mapAttrs (label: _: "https://${label}.${headscale.baseDomain}/") cfg.virtualHosts;
         readOnly = true;
         description = "The URL each virtualHosts entry is served at.";
+      };
+
+      rootCertUrl = lib.mkOption {
+        type = lib.types.str;
+        default = "http://${name}.${headscale.baseDomain}/root.crt";
+        readOnly = true;
+        description = ''
+          Where this proxy serves its local CA's root certificate. Install it
+          on every device that browses the URLs above, or they get an
+          untrusted-certificate warning. Plain HTTP by design — see
+          ../../guests/caddy-internal.nix.
+        '';
       };
     };
 
@@ -57,7 +71,7 @@ in
         assertions = [
           {
             assertion = !(cfg.virtualHosts ? ${name});
-            message = "qt1.infra.guests.caddyInternal.virtualHosts must not contain `${name}` — that name is already the proxy node's own MagicDNS record.";
+            message = "qt1.infra.guests.caddyInternal.virtualHosts must not contain `${name}` — that name is already the proxy node's own MagicDNS record, serving the local CA's root certificate.";
           }
         ];
 

@@ -272,7 +272,7 @@ script has a rough edge that can fail a restart after the first run.
 Optional, off by default. The tailnet-only counterpart of the caddy guest
 above: one [Caddy](https://caddyserver.com) reverse proxy (`10.100.0.5`) in
 front of every *internal* app, each served at its own MagicDNS name,
-`http://<label>.<baseDomain>/`:
+`https://<label>.<baseDomain>/`:
 
 ```nix
 qt1.infra.guests.caddyInternal = {
@@ -281,7 +281,7 @@ qt1.infra.guests.caddyInternal = {
   # by hand as `label = "upstream-host:port"`.
   virtualHosts.myapp = "10.100.0.9:8080";
 };
-# -> http://myapp.<baseDomain>/, listed in qt1.infra.guests.caddyInternal.urls
+# -> https://myapp.<baseDomain>/, listed in qt1.infra.guests.caddyInternal.urls
 ```
 
 Requires `guests.headscale` and `guests.caddy` (for the same NAT-hairpin
@@ -307,14 +307,57 @@ How it fits together:
   inside the headscale guest, looks them up with `headscale nodes list` and
   rewrites `/var/lib/headscale/extra-records.json` (`dns.extra_records_path`)
   when they change; headscale reloads that file by itself.
-- **Reachability**: Caddy listens on port 80, opened only on this guest's
-  `tailscale0`. It proxies only the declared hostnames; any other `Host`
-  (`caddy-internal.<baseDomain>`, the node's tailnet IP, …) gets its
-  connection closed. Upstreams are reached over the bridge, and each app's
-  guest opens its port to this guest's bridge address only.
-- **Plain HTTP**: headscale can't issue certificates for MagicDNS names
-  (there's no `tailscale cert` equivalent), and WireGuard already encrypts
-  the traffic end to end.
+- **Reachability**: Caddy listens on 443 and 80, opened only on this guest's
+  `tailscale0`. It proxies only the declared hostnames; port 80 redirects
+  each of them to https and closes the connection for any other `Host` (the
+  node's tailnet IP, a stale name, …). Upstreams are reached over the
+  bridge, and each app's guest opens its port to this guest's bridge address
+  only.
+- **HTTPS from a local CA**: headscale cannot issue publicly-trusted
+  certificates for MagicDNS names — there's no `tailscale cert` equivalent,
+  because its `/set-dns` control endpoint is a `NotImplementedHandler`
+  (HTTP 501) as of 0.29.3, so the ACME DNS-01 challenge that would drive can
+  never complete. Caddy's own local CA (`local_certs`) issues every vhost
+  certificate itself instead: offline, no challenge, nothing to resolve
+  publicly.
+
+  The cost is trust distribution — see "Trusting the local CA" below. Note
+  WireGuard already encrypts all of this end to end, so the certificates buy
+  browser trust (no warnings, working secure-context APIs) rather than new
+  confidentiality, and the bridge hop to each app stays plaintext either
+  way.
+
+### Trusting the local CA
+
+The CA's root certificate is served by the proxy itself, at
+`qt1.infra.guests.caddyInternal.rootCertUrl`:
+
+```
+http://caddy-internal.<baseDomain>/root.crt
+```
+
+Plain HTTP on purpose: a device that hasn't installed the root yet can't
+verify a certificate signed by it, so serving the root over one would be
+circular. A CA root is a public certificate, so publishing it is safe — and
+only that one path is routed, never the private keys sitting beside it.
+
+Install it once per device that browses these names, otherwise every URL
+gives an untrusted-certificate warning:
+
+- **Linux**: add to `security.pki.certificateFiles` (NixOS), or drop into
+  `/usr/local/share/ca-certificates/` and run `update-ca-certificates`.
+- **macOS**: `sudo security add-trusted-cert -d -r trustRoot -k \
+  /Library/Keychains/System.keychain root.crt`.
+- **iOS**: open the URL in Safari to install the profile, then *also* enable
+  it under Settings → General → About → Certificate Trust Settings. The
+  second step is separate and easy to miss — without it the certificate is
+  installed but not trusted.
+- **Firefox** keeps its own trust store, so add it there too regardless of
+  the OS.
+
+The root lives on the guest's `/var/lib/caddy` volume, so it survives
+restarts and this is a one-time step per device. Deleting that volume means
+a new root and re-installing everywhere.
 
 Clients need MagicDNS on to resolve the names (the default: `tailscale up`
 accepts the tailnet's DNS unless `--accept-dns=false`). The node must
@@ -362,7 +405,7 @@ guest's own volumes (`/var/lib/loki` 8G, `/var/lib/prometheus2` 4G).
 
 **Reachable only over the tailnet, at its MagicDNS alias only — this is the
 actual point of the guest.** Grafana is served at exactly one URL,
-`http://grafana.<baseDomain>/` (label: `grafanaLabel`; also exposed
+`https://grafana.<baseDomain>/` (label: `grafanaLabel`; also exposed
 read-only as `qt1.infra.guests.monitoring.grafanaUrl`), through the
 caddy-internal guest above. This guest registers that vhost there itself and
 never joins the tailnet. Four things enforce it, stacked:
