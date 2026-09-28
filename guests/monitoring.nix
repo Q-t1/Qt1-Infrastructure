@@ -177,7 +177,11 @@ in
         http_addr = "0.0.0.0";
         http_port = grafanaPort;
         domain = grafanaHostname;
-        root_url = "http://${grafanaHostname}/";
+        # https, terminated by caddy-internal with a local-CA certificate;
+        # grafana itself stays plain HTTP on the bridge behind it. Getting
+        # this scheme wrong makes grafana hand out http:// redirects and
+        # asset URLs, which the browser then blocks as mixed content.
+        root_url = "https://${grafanaHostname}/";
         # Redirects any request whose Host isn't the MagicDNS alias back to
         # it — a second layer behind caddy-internal's own Host matching (and
         # DNS rebinding protection).
