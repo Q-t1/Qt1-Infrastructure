@@ -63,24 +63,34 @@
   services.caddy = {
     enable = true;
     email = letsEncryptEmail;
-    virtualHosts.${hostname}.extraConfig = ''
-      # headscale's REST API (/api/v1/*) is bearer-token gated on its own,
-      # but that's not the same as being off the public internet — this is
-      # what actually keeps it off: never proxied, full stop. Use SSH + the
-      # local `headscale` CLI (see the README) for anything that would
-      # otherwise need this from outside the bridge.
-      @blocked path /api/*
-      respond @blocked 404
+    virtualHosts.${hostname} = {
+      # The access log, and the one thing that gives qt1.infra.crowdsec
+      # (../modules/crowdsec.nix) something to read: to this guest's stdout,
+      # captured like everything else here (see
+      # systemd.services.caddy.serviceConfig above) — mirrored to the guest's
+      # console and from there to the host's journal.
+      #
+      # It has to be this option — the vhost's own logger — and not a `log`
+      # directive in extraConfig below. A bare `log` points the access log at
+      # caddy's *default* logger, which services.caddy pins at level ERROR,
+      # and access entries are INFO: caddy then silently logs nothing, while
+      # the module's own per-vhost default keeps writing them to a file under
+      # /var/log/caddy inside this guest's tmpfs root, where nothing can read
+      # them and they grow in RAM. Verified against the adapted config: the
+      # vhost had two loggers, the file one and the muted default.
+      logFormat = "output stdout";
+      extraConfig = ''
+        # headscale's REST API (/api/v1/*) is bearer-token gated on its own,
+        # but that's not the same as being off the public internet — this is
+        # what actually keeps it off: never proxied, full stop. Use SSH + the
+        # local `headscale` CLI (see the README) for anything that would
+        # otherwise need this from outside the bridge.
+        @blocked path /api/*
+        respond @blocked 404
 
-      reverse_proxy ${upstream}
-
-      # No access log by default in caddy — this is what actually gives
-      # qt1.infra.crowdsec (../modules/crowdsec.nix) something to read.
-      # Goes to stdout, captured the same way as everything else here (see
-      # systemd.services.caddy.serviceConfig below): mirrored to this
-      # guest's console, and from there to the host's journal.
-      log
-    '';
+        reverse_proxy ${upstream}
+      '';
+    };
 
     # Prometheus metrics, when the monitoring guest collects them. Two halves:
     #

@@ -40,6 +40,10 @@
   magicDnsAliases,
   grpcFromHost,
   grpcPort,
+  # `{ port; baseUrl; from; }` when Headplane is enabled
+  # (qt1.infra.guests.headscale.headplane), `{ }` otherwise: `from` is
+  # caddy-internal's bridge address, the only thing let through to `port`.
+  headplane ? { },
 }:
 
 {
@@ -54,20 +58,31 @@ let
   # every change — no restart needed when an alias's target moves.
   extraRecordsFile = "/var/lib/headscale/extra-records.json";
   hasAliases = magicDnsAliases != { };
+  hasHeadplane = headplane != { };
   inherit (import ../lib.nix { inherit lib; }) publicResolvers;
 in
 
 {
   microvm = {
     vcpu = 2;
-    mem = 512;
+    # Headplane is a Node.js server, which roughly doubles what headscale
+    # alone needs.
+    mem = if hasHeadplane then 1024 else 512;
     volumes = [
       {
         image = "headscale-data.img";
         mountPoint = "/var/lib/headscale";
         size = 512;
       }
-    ];
+    ]
+    # Headplane's own database: its sessions and whatever it records about
+    # users. The root is tmpfs, so without this every guest restart would
+    # log everyone out.
+    ++ lib.optional hasHeadplane {
+      image = "headplane-data.img";
+      mountPoint = config.services.headplane.settings.server.data_path;
+      size = 64;
+    };
   };
 
   # Only the plain-HTTP port caddy proxies to — bridge-only, since this
@@ -89,6 +104,12 @@ in
   ++ lib.optional grpcFromHost {
     port = grpcPort;
     from = config.qt1.guest.gateway;
+  }
+  # Headplane, for caddy-internal only: that proxy is its one way in, and it
+  # only listens on the tailnet. Not the WAN-facing caddy, not the host, not
+  # the other guests.
+  ++ lib.optional hasHeadplane {
+    inherit (headplane) port from;
   };
 
   services.openssh = {
@@ -151,6 +172,37 @@ in
       };
     };
   };
+
+  # Headplane: headscale's web UI, run next to it because nixpkgs' module
+  # insists on it (it runs as headscale's user, reads its config file, and
+  # talks to it on loopback). Login is by headscale API key. There is no
+  # OIDC or proxy auth here: this repo has no identity provider, and
+  # caddy-internal doesn't know who is on the other end of the tailnet.
+  services.headplane = lib.mkIf hasHeadplane {
+    enable = true;
+    settings = {
+      server = {
+        # Every interface, with the allowedTCPPortsFrom rule above as what
+        # actually scopes it, the same trade Grafana makes in its guest.
+        host = "0.0.0.0";
+        inherit (headplane) port;
+        base_url = headplane.baseUrl;
+        # Imported below from the credential the host generates.
+        cookie_secret_path = "/run/credentials/headplane.service/headplane-cookie-secret";
+      };
+      # headscale.url defaults to loopback on services.headscale.port, and
+      # config_path to its (read-only, Nix-store) config file. Headplane
+      # shows those settings but can't change them, which is what we want:
+      # this repo is the only place headscale's config is written.
+      #
+      # dns_records_path stays unset. headscale-magicdns-aliases below owns
+      # the extra-records file and rewrites it every minute, so anything
+      # Headplane wrote there would be overwritten.
+    };
+  };
+  systemd.services.headplane.serviceConfig.ImportCredential = lib.mkIf hasHeadplane [
+    "headplane-cookie-secret"
+  ];
 
   # magicDnsAliases: publish each alias fqdn as A/AAAA records pointing at
   # the named node's current tailnet addresses. headscale refuses to start

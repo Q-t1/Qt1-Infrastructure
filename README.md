@@ -65,6 +65,7 @@ qt1.infra = {
     serverUrl = "https://access.example.com";
     baseDomain = "tailnet.example.com";   # must differ from serverUrl's domain
     adminSshKeys = [ "ssh-ed25519 AAAA... you@yourhost" ];
+    headplane.enable = true;   # optional: web UI, tailnet-only, behind caddyInternal
   };
   guests.caddy = {
     enable = true;
@@ -154,6 +155,48 @@ it's unreachable from the WAN regardless. The local `headscale` CLI (used
 above, and by `headscale-mint-tailscale-authkey` below) talks over a unix
 socket instead, so it never needs gRPC at all.
 
+### Headplane (`headplane.enable`)
+
+Optional, off by default. [Headplane](https://github.com/tale/headplane) is
+a web UI for headscale: nodes, users, pre-auth keys, ACLs. It runs inside
+this guest, next to the headscale it manages, and is reachable **over the
+tailnet only**, at `https://headplane.<baseDomain>/admin`
+(`qt1.infra.guests.headscale.headplane.url`):
+
+- caddy-internal serves it like any other internal app, so it needs
+  `guests.caddyInternal` and its local CA root on your device (see
+  "Trusting the local CA").
+- Its port (3000) is opened in the guest to caddy-internal's bridge address
+  only. The WAN-facing caddy never proxies it and this guest has no WAN
+  port forward, so it can't be reached from the internet, the host, or the
+  other guests.
+
+You log in by pasting a headscale API key, minted the usual way:
+
+```
+ssh root@10.100.0.2 headscale apikeys create --expiration 90d
+```
+
+Anyone on the tailnet can load the login page, but only someone holding an
+API key can get past it, and an API key is full admin over headscale. Keep
+the expiry short, and revoke keys you're done with
+(`headscale apikeys expire --prefix <prefix>`).
+
+What it can't do here, by design:
+
+- **Change headscale's configuration.** Headplane reads headscale's config
+  file, which lives in the Nix store, so it shows those settings read-only.
+  This repo stays the only place they're changed.
+- **Edit DNS records.** headscale's extra records belong to
+  `headscale-magicdns-aliases` (see the caddy-internal section below), which
+  rewrites them every minute, so Headplane isn't given that file.
+
+Its cookie-signing secret is generated on the host
+(`/var/lib/microvms/headscale/headplane-cookie-secret`) and handed in as a
+credential. Its sessions live on a small volume of their own, so a guest
+restart doesn't log you out. Enabling it also raises the guest's memory from
+512 MiB to 1 GiB, since Headplane is a Node.js server.
+
 Everything else is unattended: headscale generates its own Noise/DERP private
 keys under `/var/lib/headscale` (a persistent volume) the first time it's
 missing, no different from how it behaves on bare metal. `serverUrl` and
@@ -238,12 +281,36 @@ bouncer, which drops it at the host before it ever reaches caddy:
 qt1.infra.crowdsec.enable = true;
 ```
 
-Two things this depends on that are easy to get wrong by hand, so they're
-built in rather than left as setup steps:
+Three things this depends on that are easy to get wrong by hand — all three
+were silently wrong here until the CrowdSec dashboard showed 0 parsed events —
+so they're built in rather than left as setup steps:
 
-- **Caddy needs an access log to begin with** — off by default in caddy
-  itself. `guests/caddy.nix` adds a bare `log` directive for exactly this;
-  without it there's nothing for CrowdSec to read.
+- **Caddy needs an access log, on stdout, at INFO** — caddy logs no requests
+  at all by default, and the two obvious ways to turn it on both produce
+  nothing readable here. `guests/caddy.nix` sets the vhost's own
+  `logFormat = "output stdout"`: the guest mirrors stdout to its console and
+  the host's journal, which is the only way anything leaves that guest and
+  the only thing CrowdSec reads. A bare `log` directive instead points the
+  access log at caddy's *default* logger, which `services.caddy` pins at
+  level `ERROR` — access entries are INFO, so caddy silently logs nothing —
+  and the nixpkgs module's own default writes them to a file under
+  `/var/log/caddy` inside the guest's tmpfs root, where nothing can read them
+  and they grow in RAM. Both were live here until the caddy/crowdsec
+  dashboards made the silence visible.
+- **Something has to feed the hub's caddy parser.** The `crowdsecurity/caddy`
+  collection installs a parser for `s01-parse` and an enricher for
+  `s02-enrich` and *nothing* for `s00-raw` — yet its parser filters on
+  `evt.Parsed.program` and reads `evt.Parsed.message`, fields that only exist
+  once an `s00-raw` parser has set them (normally `crowdsecurity/non-syslog`,
+  which ships inside a collection this one does not depend on). On top of that
+  every line arrives wrapped in the guest's console format,
+  `[   12.345678] caddy[480]: {...}`, which is no longer JSON.
+  `modules/crowdsec.nix` therefore ships one local parser
+  (`qt1/microvm-console`, via `localConfig.parsers.s00Raw`) that strips the
+  prefix — optionally, so a bare line works too — and sets those two fields.
+  Check it with `sudo cscli explain --log '<a line from journalctl -u
+  microvm@caddy>' --type caddy`: the chain should reach `s02-enrich` and then
+  list scenarios.
 - **The ban has to land on `FORWARD`, not just `INPUT`.** The WAN traffic
   this protects is never delivered to the host itself — it's `FORWARD`ed
   on to the caddy guest by `qt1.infra.microvmHost`'s NAT
@@ -265,6 +332,25 @@ registering the bouncer, minting its API key — is unattended, the same
 pattern as headscale's own secrets above: `cscli bouncers add` runs
 automatically the first time, idempotent after that.
 
+**Migrating a host that ran CrowdSec before this module turned off
+`DynamicUser`** (see the comment in `modules/crowdsec.nix`). Its state still
+sits in `/var/lib/private/`, partly owned by `nobody`. Move it back and chown
+it once, *before* switching to the new configuration, with both units stopped:
+
+```sh
+sudo systemctl stop crowdsec-firewall-bouncer.service crowdsec.service
+for d in crowdsec crowdsec-firewall-bouncer-register; do
+  sudo rm /var/lib/$d                      # the symlink into private/
+  sudo mv /var/lib/private/$d /var/lib/$d
+  sudo chown -R crowdsec:crowdsec /var/lib/$d
+done
+sudo nixos-rebuild switch --flake .#<host>
+```
+
+The ban list (`crowdsec.db`), the machine credentials and the bouncer's API
+key all come along, so nothing is re-registered. The bouncer stops enforcing
+bans between the `stop` and the switch.
+
 No CrowdSec Console enrollment or central API (CAPI) registration here —
 this is a purely local deployment (local detection, local ban list, no
 account, no shared community blocklist). Wiring that in is a matter of
@@ -282,7 +368,8 @@ front of every *internal* app, each served at its own MagicDNS name,
 ```nix
 qt1.infra.guests.caddyInternal = {
   enable = true;
-  # Guests register their own entry (monitoring adds `grafana`); add others
+  # Guests register their own entry (monitoring adds `grafana`, headscale
+  # adds `headplane`); add others
   # by hand as `label = "upstream-host:port"`.
   virtualHosts.myapp = "10.100.0.9:8080";
 };
