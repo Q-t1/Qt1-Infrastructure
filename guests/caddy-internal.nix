@@ -53,6 +53,7 @@
 # that gets none of the host's specialArgs.
 {
   baseDomain,
+  # `label = { upstream; path; }`, as qt1.infra.guests.caddyInternal.virtualHosts.
   virtualHosts,
   # `{ port = <n>; from = "<address>"; }` when the monitoring guest scrapes
   # this one (qt1.infra.guests.caddyInternal.metricsFromMonitoring), `{ }`
@@ -145,7 +146,7 @@ in
       }
     '';
     virtualHosts = lib.mapAttrs' (
-      label: upstream:
+      label: vhost:
       lib.nameValuePair "https://${label}.${baseDomain}" {
         # Access log to stdout — and from there to the guest's console and the
         # host's journal (see systemd.services.caddy above) — instead of the
@@ -155,9 +156,15 @@ in
         # access log at caddy's default logger instead would mute it, since
         # services.caddy pins that one at ERROR.
         logFormat = "output stdout";
-        extraConfig = ''
-          reverse_proxy ${upstream}
-        '';
+        # An app under a subpath answers `/` with its own 404, which for
+        # Headplane is an empty page. `redir /` matches that exact path only.
+        extraConfig =
+          lib.optionalString (vhost.path != "/") ''
+            redir / ${vhost.path}
+          ''
+          + ''
+            reverse_proxy ${vhost.upstream}
+          '';
       }
     ) virtualHosts;
     # Three things that aren't per-app reverse proxies:
