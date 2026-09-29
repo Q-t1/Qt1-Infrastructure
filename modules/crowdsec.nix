@@ -114,12 +114,22 @@ in
       # has two jobs — both of which have to happen before
       # crowdsecurity/caddy-logs (s01-parse) can do anything:
       #
-      #  1. Strip the serial-console prefix. The acquisition reads the caddy
-      #     guest's mirrored console, so each line arrives as
-      #     `[   12.345678] caddy[480]: {"level":...}` — journald's console
-      #     format wrapped around caddy's JSON. caddy-logs unmarshals the line
-      #     as JSON, and a prefixed line is not JSON. The prefix is optional in
-      #     the pattern, so a line that ever arrives bare parses too.
+      #  1. Strip everything in front of caddy's JSON. caddy-logs unmarshals
+      #     the line as JSON, and a prefixed line is not JSON. There are two
+      #     layers of prefix. The acquisition reads the caddy guest's mirrored
+      #     console, which wraps each line as
+      #     `[   12.345678] caddy[480]: {"level":...}`. Then the journalctl
+      #     source runs `journalctl --follow` with no `-o`, so the host's
+      #     journal adds its default `short` header in front of that:
+      #     `Sep 29 22:30:44 homelab-1 microvm@caddy[702795]: [   12.345678] ...`.
+      #     Both are optional in the pattern, so a line that ever arrives with
+      #     either one missing (or bare) parses too.
+      #
+      #     The first version only stripped the console prefix, anchored at
+      #     the start of the line. The journal header sat in front of it, so
+      #     the whole line went through as the message and every live line
+      #     failed caddy-logs. It passed `cscli explain` because the test line
+      #     had been copied without that header.
       #
       #  2. Set evt.Parsed.message and evt.Parsed.program, which is what
       #     caddy-logs actually filters on (`evt.Parsed.program startsWith
@@ -144,13 +154,13 @@ in
       localConfig.parsers.s00Raw = [
         {
           name = "qt1/microvm-console";
-          description = "Strip the serial-console prefix from the caddy guest's mirrored logs, and hand the line to the hub's caddy parser the way crowdsecurity/non-syslog would";
+          description = "Strip the journal header and serial-console prefix from the caddy guest's mirrored logs, and hand the line to the hub's caddy parser the way crowdsecurity/non-syslog would";
           filter = "evt.Line.Labels.type == 'caddy'";
           onsuccess = "next_stage";
           nodes = [
             {
               grok = {
-                pattern = "^(?:\\[\\s*%{NUMBER}\\] %{NOTSPACE}: )?%{GREEDYDATA:console_payload}$";
+                pattern = "^(?:%{SYSLOGTIMESTAMP} %{NOTSPACE} %{NOTSPACE}: )?(?:\\[\\s*%{NUMBER}\\] %{NOTSPACE}: )?%{GREEDYDATA:console_payload}$";
                 apply_on = "Line.Raw";
               };
             }

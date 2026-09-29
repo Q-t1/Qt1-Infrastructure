@@ -303,14 +303,19 @@ so they're built in rather than left as setup steps:
   `evt.Parsed.program` and reads `evt.Parsed.message`, fields that only exist
   once an `s00-raw` parser has set them (normally `crowdsecurity/non-syslog`,
   which ships inside a collection this one does not depend on). On top of that
-  every line arrives wrapped in the guest's console format,
-  `[   12.345678] caddy[480]: {...}`, which is no longer JSON.
-  `modules/crowdsec.nix` therefore ships one local parser
-  (`qt1/microvm-console`, via `localConfig.parsers.s00Raw`) that strips the
-  prefix — optionally, so a bare line works too — and sets those two fields.
-  Check it with `sudo cscli explain --log '<a line from journalctl -u
-  microvm@caddy>' --type caddy`: the chain should reach `s02-enrich` and then
-  list scenarios.
+  every line arrives wrapped twice, which is no longer JSON: in the guest's
+  console format, `[   12.345678] caddy[480]: {...}`, and in front of that the
+  host journal's default `short` header (`Sep 29 22:30:44 homelab-1
+  microvm@caddy[702795]: `), because CrowdSec's journalctl source runs
+  `journalctl` without `-o`. `modules/crowdsec.nix` therefore ships one local
+  parser (`qt1/microvm-console`, via `localConfig.parsers.s00Raw`) that strips
+  both — each optionally, so a line with either one missing works too — and
+  sets those two fields. Check it with `sudo cscli explain --log '<a line from
+  journalctl -u microvm@caddy -o short>' --type caddy`. Include the journal
+  header, since that's what the live agent sees. The chain should reach
+  `s02-enrich` and then list scenarios. On the running agent, `sudo cscli
+  metrics` should show `crowdsecurity/caddy-logs` hits, not just
+  `qt1/microvm-console` ones.
 - **The ban has to land on `FORWARD`, not just `INPUT`.** The WAN traffic
   this protects is never delivered to the host itself — it's `FORWARD`ed
   on to the caddy guest by `qt1.infra.microvmHost`'s NAT
