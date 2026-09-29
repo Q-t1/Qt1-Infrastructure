@@ -37,6 +37,58 @@ let
   crowdsecConfigFile =
     (pkgs.formats.yaml { }).generate "crowdsec.yaml"
       config.services.crowdsec.settings.general;
+
+  # Every localConfig file upstream links into /etc/crowdsec, as
+  # `link path -> store path`. Read back from upstream's tmpfiles rules (a
+  # reachable option, unlike the let bindings that build them), which are
+  # its only `L+` entries.
+  localConfigLinks = lib.mapAttrs (_: rule: rule.link.argument) (
+    lib.filterAttrs (_: rule: rule ? link) config.systemd.tmpfiles.settings."10-crowdsec"
+  );
+
+  # The directories those links go in. Upstream keeps them in private let
+  # bindings, so they're repeated here, the same way crowdsecConfigFile is.
+  localConfigDirs = map (dir: "/etc/crowdsec/${dir}") [
+    "scenarios"
+    "parsers/s00-raw"
+    "parsers/s01-parse"
+    "parsers/s02-enrich"
+    "postoverflows/s01-whitelist"
+    "contexts"
+    "notifications"
+  ];
+
+  # Makes the links in localConfigDirs match localConfigLinks exactly: removes
+  # every link into /nix/store the current config doesn't list, and (re)creates
+  # every one it does. Links into the hub (/var/lib/crowdsec/state/hub) and
+  # anything that isn't a symlink are left alone. See the ExecStartPre below.
+  syncLocalConfigLinks = pkgs.writeShellScript "crowdsec-sync-local-config" ''
+    set -euo pipefail
+    declare -A want=(
+      ${lib.concatStringsSep "\n  " (
+        lib.mapAttrsToList (
+          link: target: "[${lib.escapeShellArg link}]=${lib.escapeShellArg target}"
+        ) localConfigLinks
+      )}
+    )
+    for dir in ${lib.escapeShellArgs localConfigDirs}; do
+      for f in "$dir"/*; do
+        [ -L "$f" ] || continue
+        case "$(${lib.getExe' pkgs.coreutils "readlink"} -- "$f")" in
+          /nix/store/*) ;;
+          *) continue ;;
+        esac
+        if [ -z "''${want[$f]:-}" ]; then
+          echo "removing stale local config $f"
+          ${lib.getExe' pkgs.coreutils "rm"} -f -- "$f"
+        fi
+      done
+    done
+    for f in "''${!want[@]}"; do
+      ${lib.getExe' pkgs.coreutils "mkdir"} -p -- "$(${lib.getExe' pkgs.coreutils "dirname"} -- "$f")"
+      ${lib.getExe' pkgs.coreutils "ln"} -sfn -- "''${want[$f]}" "$f"
+    done
+  '';
 in
 {
   options.qt1.infra.crowdsec = {
@@ -339,8 +391,25 @@ in
     # earlier broken run) would silently keep this symlink from ever
     # being created too, reproducing the exact error this exists to fix
     # for no reason connected to it.
+    #
+    # The second command cleans up after upstream's own localConfig links.
+    # Upstream names each link after the store file it points to
+    # (`<hash>-parsers-s00-raw.yaml`), so every change to a local parser,
+    # scenario, etc. adds a new link beside the old one, and tmpfiles never
+    # removes the old one. Both then define the same name: crowdsec warns
+    # "multiple parsers named ...", keeps one of them, and nothing says it
+    # keeps the new one. That happened here after the s00-raw pattern fix:
+    # the pre-fix parser, which fails every line, sat next to its
+    # replacement until it was deleted by hand.
+    #
+    # It also (re)creates the links the current config wants, for the same
+    # race as config.yaml above: a switch that changes a local parser both
+    # restarts this unit (restartTriggers) and adds its tmpfiles rule, in no
+    # guaranteed order. Removing the stale link without creating the new one
+    # would leave crowdsec with no parser at all.
     systemd.services.crowdsec.serviceConfig.ExecStartPre = lib.mkBefore [
       "${lib.getExe' pkgs.coreutils "ln"} -sf ${crowdsecConfigFile} /etc/crowdsec/config.yaml"
+      "${syncLocalConfigLinks}"
     ];
 
     services.crowdsec-firewall-bouncer = {
