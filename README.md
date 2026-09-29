@@ -377,6 +377,11 @@ qt1.infra.guests.caddyInternal = {
   # adds `headplane`); add others
   # by hand as `label = "upstream-host:port"`.
   virtualHosts.myapp = "10.100.0.9:8080";
+  # An app that only answers under a subpath gets `/` redirected there.
+  virtualHosts.otherapp = {
+    upstream = "10.100.0.9:8081";
+    path = "/admin/";
+  };
 };
 # -> https://myapp.<baseDomain>/, listed in qt1.infra.guests.caddyInternal.urls
 ```

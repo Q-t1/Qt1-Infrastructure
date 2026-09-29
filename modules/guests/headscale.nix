@@ -316,8 +316,10 @@ in
           }
         ];
 
-        qt1.infra.guests.caddyInternal.virtualHosts.${cfg.headplane.label} =
-          "${cfg.address}:${toString cfg.headplane.port}";
+        qt1.infra.guests.caddyInternal.virtualHosts.${cfg.headplane.label} = {
+          upstream = "${cfg.address}:${toString cfg.headplane.port}";
+          path = "/admin/";
+        };
       })
 
       {

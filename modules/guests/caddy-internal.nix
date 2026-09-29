@@ -21,14 +21,42 @@ in
     }
     // {
       virtualHosts = lib.mkOption {
-        type = lib.types.attrsOf lib.types.str;
+        type = lib.types.attrsOf (
+          lib.types.coercedTo lib.types.str (upstream: { inherit upstream; }) (
+            lib.types.submodule {
+              options = {
+                upstream = lib.mkOption {
+                  type = lib.types.str;
+                  description = "Where the app listens, as `host:port`.";
+                };
+                path = lib.mkOption {
+                  type = lib.types.str;
+                  default = "/";
+                  example = "/admin/";
+                  description = ''
+                    The path the app lives under, for an app that serves
+                    nothing at `/` (Headplane only answers under /admin).
+                    Requests for `/` itself are redirected here, so the bare
+                    hostname works instead of showing the app's empty 404.
+                  '';
+                };
+              };
+            }
+          )
+        );
         default = { };
         example = {
           grafana = "10.100.0.4:3000";
+          headplane = {
+            upstream = "10.100.0.2:3000";
+            path = "/admin/";
+          };
         };
         description = ''
-          Internal apps to serve, as `label = "upstream-host:port"`. Each is
-          reachable over the tailnet only, at `https://<label>.<baseDomain>/`
+          Internal apps to serve, as `label = "upstream-host:port"`, or
+          `label = { upstream; path; }` for an app that lives under a
+          subpath. Each is reachable over the tailnet only, at
+          `https://<label>.<baseDomain>/`
           (qt1.infra.guests.headscale.baseDomain), behind a certificate from
           caddy's own local CA — whose root must be installed on each client
           device, see ../../guests/caddy-internal.nix. Guests set their own
@@ -39,7 +67,9 @@ in
 
       urls = lib.mkOption {
         type = lib.types.attrsOf lib.types.str;
-        default = lib.mapAttrs (label: _: "https://${label}.${headscale.baseDomain}/") cfg.virtualHosts;
+        default = lib.mapAttrs (
+          label: vhost: "https://${label}.${headscale.baseDomain}${vhost.path}"
+        ) cfg.virtualHosts;
         readOnly = true;
         description = "The URL each virtualHosts entry is served at.";
       };
