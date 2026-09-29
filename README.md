@@ -65,6 +65,7 @@ qt1.infra = {
     serverUrl = "https://access.example.com";
     baseDomain = "tailnet.example.com";   # must differ from serverUrl's domain
     adminSshKeys = [ "ssh-ed25519 AAAA... you@yourhost" ];
+    headplane.enable = true;   # optional: web UI, tailnet-only, behind caddyInternal
   };
   guests.caddy = {
     enable = true;
@@ -153,6 +154,48 @@ gRPC (`grpc_listen_addr`) is unaffected by any of this: it defaults to
 it's unreachable from the WAN regardless. The local `headscale` CLI (used
 above, and by `headscale-mint-tailscale-authkey` below) talks over a unix
 socket instead, so it never needs gRPC at all.
+
+### Headplane (`headplane.enable`)
+
+Optional, off by default. [Headplane](https://github.com/tale/headplane) is
+a web UI for headscale: nodes, users, pre-auth keys, ACLs. It runs inside
+this guest, next to the headscale it manages, and is reachable **over the
+tailnet only**, at `https://headplane.<baseDomain>/admin`
+(`qt1.infra.guests.headscale.headplane.url`):
+
+- caddy-internal serves it like any other internal app, so it needs
+  `guests.caddyInternal` and its local CA root on your device (see
+  "Trusting the local CA").
+- Its port (3000) is opened in the guest to caddy-internal's bridge address
+  only. The WAN-facing caddy never proxies it and this guest has no WAN
+  port forward, so it can't be reached from the internet, the host, or the
+  other guests.
+
+You log in by pasting a headscale API key, minted the usual way:
+
+```
+ssh root@10.100.0.2 headscale apikeys create --expiration 90d
+```
+
+Anyone on the tailnet can load the login page, but only someone holding an
+API key can get past it, and an API key is full admin over headscale. Keep
+the expiry short, and revoke keys you're done with
+(`headscale apikeys expire --prefix <prefix>`).
+
+What it can't do here, by design:
+
+- **Change headscale's configuration.** Headplane reads headscale's config
+  file, which lives in the Nix store, so it shows those settings read-only.
+  This repo stays the only place they're changed.
+- **Edit DNS records.** headscale's extra records belong to
+  `headscale-magicdns-aliases` (see the caddy-internal section below), which
+  rewrites them every minute, so Headplane isn't given that file.
+
+Its cookie-signing secret is generated on the host
+(`/var/lib/microvms/headscale/headplane-cookie-secret`) and handed in as a
+credential. Its sessions live on a small volume of their own, so a guest
+restart doesn't log you out. Enabling it also raises the guest's memory from
+512 MiB to 1 GiB, since Headplane is a Node.js server.
 
 Everything else is unattended: headscale generates its own Noise/DERP private
 keys under `/var/lib/headscale` (a persistent volume) the first time it's
@@ -325,7 +368,8 @@ front of every *internal* app, each served at its own MagicDNS name,
 ```nix
 qt1.infra.guests.caddyInternal = {
   enable = true;
-  # Guests register their own entry (monitoring adds `grafana`); add others
+  # Guests register their own entry (monitoring adds `grafana`, headscale
+  # adds `headplane`); add others
   # by hand as `label = "upstream-host:port"`.
   virtualHosts.myapp = "10.100.0.9:8080";
 };

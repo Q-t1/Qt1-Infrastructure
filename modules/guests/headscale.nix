@@ -14,6 +14,7 @@ let
   infraLib = import ../../lib.nix { inherit lib; };
   host = config.qt1.infra.microvmHost;
   cfg = config.qt1.infra.guests.headscale;
+  caddyInternal = config.qt1.infra.guests.caddyInternal;
 in
 {
   options.qt1.infra.guests.headscale =
@@ -184,6 +185,67 @@ in
           shared across every machine that wants to join the tailnet.
         '';
       };
+
+      headplane = {
+        enable = lib.mkOption {
+          type = lib.types.bool;
+          default = false;
+          description = ''
+            Run Headplane, headscale's web UI, reachable over the tailnet
+            only. It runs inside this guest, next to the headscale it
+            manages, and is served by caddy-internal
+            (qt1.infra.guests.caddyInternal) at `url`. Its port is opened to
+            caddy-internal's bridge address only. The WAN-facing caddy never
+            proxies it and this guest has no forwardPorts entry, so it can't
+            be reached from the internet or from the other guests.
+
+            You log in with a headscale API key, minted on demand over SSH
+            like any other (see the README).
+          '';
+        };
+
+        label = lib.mkOption {
+          type = lib.types.str;
+          default = "headplane";
+          description = ''
+            Headplane's vhost on caddy-internal, i.e. the first label of its
+            MagicDNS alias: `<label>.<baseDomain>`.
+          '';
+        };
+
+        url = lib.mkOption {
+          type = lib.types.str;
+          default = "https://${cfg.headplane.label}.${cfg.baseDomain}/admin";
+          readOnly = true;
+          description = ''
+            Where Headplane answers, over the tailnet only. Headplane serves
+            everything under /admin.
+          '';
+        };
+
+        port = lib.mkOption {
+          type = lib.types.port;
+          default = 3000;
+          readOnly = true;
+          description = ''
+            Port Headplane listens on inside this guest (its own default),
+            opened to caddy-internal's bridge address only.
+          '';
+        };
+
+        cookieSecretFile = lib.mkOption {
+          type = lib.types.str;
+          default = "/var/lib/microvms/headscale/headplane-cookie-secret";
+          description = ''
+            Host path holding the secret Headplane signs its session cookies
+            with (exactly 32 characters). It's generated on the host the
+            first time this path doesn't exist (see
+            headscale-provision-secrets) and handed to the guest as a systemd
+            credential, so it never lands in the Nix store. Delete it and
+            restart microvm@headscale to rotate it. That logs everyone out.
+          '';
+        };
+      };
     };
 
   config = lib.mkIf cfg.enable (
@@ -201,10 +263,20 @@ in
             grpcPort
             ;
           adminSshKeys = host.adminSshKeys ++ cfg.adminSshKeys;
+          # A plain conditional, not lib.mkIf, for the same reason as
+          # caddy-internal's `metrics`: a function argument, not an option.
+          headplane = lib.optionalAttrs cfg.headplane.enable {
+            inherit (cfg.headplane) port;
+            baseUrl = "https://${cfg.headplane.label}.${cfg.baseDomain}";
+            from = caddyInternal.address;
+          };
         };
         credentialFiles = {
           ssh-host-ed25519-key = cfg.sshHostKeyFile;
           automation-ssh-pubkey = "${cfg.automationSshKeyFile}.pub";
+        }
+        // lib.optionalAttrs cfg.headplane.enable {
+          headplane-cookie-secret = cfg.headplane.cookieSecretFile;
         };
       })
 
@@ -213,18 +285,39 @@ in
         description = "Generate the headscale guest's SSH host key and automation SSH key";
         path = [
           pkgs.openssh
+          pkgs.openssl
           pkgs.coreutils
         ];
-        secrets = {
-          ${cfg.sshHostKeyFile} = ''
-            ssh-keygen -q -t ed25519 -N "" -f "$f"
-            rm -f "$f.pub"
-          '';
-          ${cfg.automationSshKeyFile} = ''
-            ssh-keygen -q -t ed25519 -N "" -f "$f"
-            chmod 0444 "$f.pub"
-          '';
-        };
+        secrets =
+          lib.optionalAttrs cfg.headplane.enable {
+            # Exactly 32 characters, no trailing newline: Headplane rejects any
+            # other length.
+            ${cfg.headplane.cookieSecretFile} = ''
+              printf '%s' "$(openssl rand -hex 16)" > "$f"
+            '';
+          }
+          // {
+            ${cfg.sshHostKeyFile} = ''
+              ssh-keygen -q -t ed25519 -N "" -f "$f"
+              rm -f "$f.pub"
+            '';
+            ${cfg.automationSshKeyFile} = ''
+              ssh-keygen -q -t ed25519 -N "" -f "$f"
+              chmod 0444 "$f.pub"
+            '';
+          };
+      })
+
+      (lib.mkIf cfg.headplane.enable {
+        assertions = [
+          {
+            assertion = caddyInternal.enable;
+            message = "qt1.infra.guests.headscale.headplane requires qt1.infra.guests.caddyInternal.enable — the tailnet-only proxy is Headplane's only way in.";
+          }
+        ];
+
+        qt1.infra.guests.caddyInternal.virtualHosts.${cfg.headplane.label} =
+          "${cfg.address}:${toString cfg.headplane.port}";
       })
 
       {

@@ -18,6 +18,7 @@
   };
   qt1.infra.crowdsec.enable = true;
   qt1.infra.guests.caddyInternal.enable = true;
+  qt1.infra.guests.headscale.headplane.enable = true;
   qt1.infra.guests.monitoring.enable = true;
   # loginServerUrl/authKeyFile/loginServerAddress default to the
   # headscale/caddy guests' own values.
