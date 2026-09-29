@@ -227,6 +227,48 @@ in
     # got scoped down to its own directory.
     systemd.services.crowdsec.serviceConfig.StateDirectory = "crowdsec";
 
+    # Both units that claim that StateDirectory run as upstream's *static*
+    # crowdsec user (uid from users.users.crowdsec), yet upstream also sets
+    # DynamicUser = true on them. That combination gives two owners for one
+    # tree, and they disagree:
+    #
+    #  - DynamicUser moves the directory to /var/lib/private/crowdsec,
+    #    owned by `nobody` on disk, and mounts it *idmapped* into each unit
+    #    so that nobody reads as the service user inside. Everything
+    #    crowdsec or cscli creates there (crowdsec.db, state/trace, ...)
+    #    lands on disk as nobody.
+    #  - Upstream's tmpfiles rules for state/ and state/hub/ name the real
+    #    crowdsec user, and the `d` type re-chowns an existing directory.
+    #    On disk, crowdsec's uid is *not* what the idmapped mount maps, so
+    #    inside the units state/ then reads as someone else's 0750
+    #    directory: no way in.
+    #
+    # Nothing noticed for a week because tmpfiles only re-runs on a switch
+    # that changes some tmpfiles rule (or on boot). The first one after the
+    # move to private/ (the s00-raw parser's symlink) chowned state/ back to
+    # crowdsec and broke the register unit
+    # (`mkdir /var/lib/crowdsec/state/trace: permission denied`). The
+    # still-running crowdsec would have failed the same way on its next
+    # restart. The next tmpfiles run then hit the nobody-owned parent and
+    # refused ("Detected unsafe path transition").
+    #
+    # So these units drop DynamicUser. The user is static anyway, and every
+    # other sandboxing setting upstream applies stays. The state lives at a
+    # plain /var/lib/crowdsec, owned by crowdsec throughout, which is what
+    # the tmpfiles rules already assume. Migrating an existing host from
+    # /var/lib/private is a one-off manual step; see the README.
+    systemd.services.crowdsec.serviceConfig.DynamicUser = lib.mkForce false;
+    systemd.services.crowdsec-firewall-bouncer-register.serviceConfig.DynamicUser = lib.mkForce false;
+
+    # Local parsers (and scenarios, etc.) reach crowdsec as tmpfiles
+    # symlinks under /etc/crowdsec, not through its unit or its config file.
+    # A switch that only changes one of them leaves the unit untouched, so
+    # the running agent never loads the change: c903e20's parser was
+    # deployed and then sat idle for exactly that reason.
+    systemd.services.crowdsec.restartTriggers = [
+      (builtins.toJSON config.services.crowdsec.localConfig)
+    ];
+
     # NOTE for readers of the git history: an earlier version of this file
     # stripped "crowdsec" out of crowdsec-firewall-bouncer-register.service's
     # own StateDirectory (upstream declares
@@ -316,6 +358,42 @@ in
     systemd.services.crowdsec-firewall-bouncer.after = [
       "crowdsec-firewall-bouncer-register.service"
     ];
+
+    # Upstream's register script, with one change: a failing `cscli bouncers
+    # list` now fails the unit. Upstream pipes it straight into `jq -e` and
+    # reads any failure as "not registered", then deletes the saved API key
+    # before trying `cscli bouncers add`. When cscli itself is what's broken,
+    # the add fails too, and the host is left with the bouncer registered in
+    # the LAPI but no key on disk. That fails every later run ("Bouncer
+    # registered but API key is not present"), and the bouncer can't start
+    # again until someone runs `cscli bouncers delete` by hand. It happened
+    # here with the permissions breakage described above: an unrelated
+    # cscli error turned into a bouncer outage at the next restart.
+    #
+    # Querying first, under the unit's `set -e`, means a cscli error stops
+    # the run before anything is deleted. The existing key stays, and the
+    # next run after the actual fix just finds it.
+    systemd.services.crowdsec-firewall-bouncer-register.script =
+      let
+        bouncerName = config.services.crowdsec-firewall-bouncer.registerBouncer.bouncerName;
+        apiKeyFile = "/var/lib/crowdsec-firewall-bouncer-register/api-key.cred";
+      in
+      lib.mkForce ''
+        cscli=${lib.getExe' config.services.crowdsec.package "cscli"}
+        bouncers=$($cscli bouncers list --output json)
+        if ${lib.getExe pkgs.jq} -e -- ${lib.escapeShellArg "any(.[]; .name == \"${bouncerName}\")"} >/dev/null <<<"$bouncers"; then
+          if [ ! -f ${apiKeyFile} ]; then
+            echo "Bouncer registered but API key is not present"
+            exit 1
+          fi
+        else
+          rm -f '${apiKeyFile}'
+          if ! $cscli bouncers add --output raw -- ${lib.escapeShellArg bouncerName} >${apiKeyFile}; then
+            rm ${apiKeyFile}
+            exit 1
+          fi
+        fi
+      '';
 
     networking.nftables.tables = lib.mkIf usingNftables {
       crowdsec = {

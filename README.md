@@ -289,6 +289,25 @@ registering the bouncer, minting its API key — is unattended, the same
 pattern as headscale's own secrets above: `cscli bouncers add` runs
 automatically the first time, idempotent after that.
 
+**Migrating a host that ran CrowdSec before this module turned off
+`DynamicUser`** (see the comment in `modules/crowdsec.nix`). Its state still
+sits in `/var/lib/private/`, partly owned by `nobody`. Move it back and chown
+it once, *before* switching to the new configuration, with both units stopped:
+
+```sh
+sudo systemctl stop crowdsec-firewall-bouncer.service crowdsec.service
+for d in crowdsec crowdsec-firewall-bouncer-register; do
+  sudo rm /var/lib/$d                      # the symlink into private/
+  sudo mv /var/lib/private/$d /var/lib/$d
+  sudo chown -R crowdsec:crowdsec /var/lib/$d
+done
+sudo nixos-rebuild switch --flake .#<host>
+```
+
+The ban list (`crowdsec.db`), the machine credentials and the bouncer's API
+key all come along, so nothing is re-registered. The bouncer stops enforcing
+bans between the `stop` and the switch.
+
 No CrowdSec Console enrollment or central API (CAPI) registration here —
 this is a purely local deployment (local detection, local ban list, no
 account, no shared community blocklist). Wiring that in is a matter of
