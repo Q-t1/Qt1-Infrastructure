@@ -97,6 +97,18 @@ in
       enable = true;
       hub.collections = cfg.collections;
 
+      # crowdsec registers its GeoIpCity/GeoIpASN enrichers at startup no
+      # matter what, but the databases they read (GeoLite2-City.mmdb,
+      # GeoLite2-ASN.mmdb, in the data dir) are only ever downloaded as the
+      # data files of this hub parser. It normally comes in through
+      # crowdsecurity/linux, which the caddy collection does not depend on,
+      # so without it here the agent logged "unable to open
+      # GeoLite2-City.mmdb" on every start and alerts carried no country,
+      # AS or source range. Source-agnostic: it enriches any event with a
+      # public source_ip (it skips private and loopback ranges itself), so
+      # it needs no acquisition of its own, unlike cfg.collections.
+      hub.parsers = [ "crowdsecurity/geoip-enrich" ];
+
       localConfig.acquisitions = [
         {
           source = "journalctl";
