@@ -627,7 +627,8 @@ qt1.infra.guests.gatus = {
 
 The WAN-facing caddy serves it at `https://<hostname>/`, with a Let's Encrypt
 certificate of its own. Its port (8080) is opened to caddy's bridge address
-only, and the guest has no port forward of its own.
+and the host's (for the pushes below) only, and the guest has no port forward
+of its own.
 
 What it checks is derived from the rest of this repo, so there is nothing to
 list by hand:
@@ -647,6 +648,18 @@ list by hand:
   local CA is generated at runtime and this guest has no copy of it. What's
   checked is that the proxy and the app behind it answer (any status below
   400, after redirects).
+- **MicroVMs / one per VM the host autostarts** (`microvm.autostart`, minus
+  gatus itself; set `qt1.infra.guests.gatus.microvms` to choose): up while
+  the host's `microvm@<name>` unit is `active`, down otherwise. The guest
+  can't see the host's systemd, so these are gatus
+  [external endpoints](https://github.com/TwiN/gatus#external-endpoints):
+  a host-side timer, `gatus-push-microvms`, runs `systemctl is-active` every
+  minute and pushes the result to gatus over the bridge. Each has a 5-minute
+  heartbeat, so if the pushes stop, the VMs show as down instead of staying
+  green. The push API is also reachable through the public caddy. The only
+  thing guarding it is a bearer token, generated on the host at
+  `pushTokenFile` (`/var/lib/microvms/gatus/push-token`) and handed to the
+  guest as a credential.
 
 Add more with `qt1.infra.guests.gatus.endpoints`, in
 [gatus's own format](https://gatus.io/docs).
@@ -656,7 +669,9 @@ gatus's `ui.hide-hostname`, `hide-url`, `hide-port` and `hide-errors`: the
 page shows each check's name, its conditions and whether they held, never an
 internal address or hostname. Errors are still logged:
 `journalctl -u microvm@gatus` on the host. Set the same `ui` options on any
-internal endpoint you add yourself.
+internal endpoint you add yourself. The MicroVMs group is the exception: the
+page shows each VM's name and, when one is down, the unit's state (`unit is
+failed`), which says nothing about addresses.
 
 Check history lives in SQLite on the guest's `/var/lib/gatus` volume, so it
 survives restarts (and, like every other volume here, not a reinstall of the

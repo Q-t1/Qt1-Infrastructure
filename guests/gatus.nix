@@ -5,9 +5,10 @@
 #
 # Public, unlike every other web UI here: the WAN-facing caddy guest
 # (./caddy.nix) serves it at its own hostname with a Let's Encrypt
-# certificate. Its port is opened on the bridge to caddy's address only, so
-# that proxy stays its one way in; the guest itself never appears in the
-# host's networking.nat.forwardPorts.
+# certificate. Its port is opened on the bridge to caddy's address, so that
+# proxy stays the public's one way in, and to the host's, which pushes the
+# microVMs' systemd state to it (the external endpoints); the guest itself
+# never appears in the host's networking.nat.forwardPorts.
 #
 # The checks run from here, over the bridge, so they see what a client
 # would: headscale through the public caddy and its real certificate, and
@@ -31,11 +32,20 @@
   proxyAddress,
   # gatus endpoints, in its own format.
   endpoints,
+  # gatus external endpoints (results pushed by the host), in its own
+  # format. Their token is `''${GATUS_PUSH_TOKEN}`, exported below from the
+  # gatus-push-token credential.
+  externalEndpoints,
   # `address = [ hostname ... ]`, added to /etc/hosts.
   hosts,
 }:
 
-{ lib, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 
 let
   # Must match ../modules/guests/gatus.nix.
@@ -60,6 +70,10 @@ in
       port = webPort;
       from = proxyAddress;
     }
+    {
+      port = webPort;
+      from = config.qt1.guest.gateway;
+    }
   ];
 
   networking.hosts = hosts;
@@ -73,6 +87,7 @@ in
         path = "${stateDir}/data.db";
       };
       inherit endpoints;
+      external-endpoints = externalEndpoints;
     };
   };
 
@@ -90,6 +105,18 @@ in
 
   systemd.services.gatus.serviceConfig = {
     DynamicUser = lib.mkForce false;
+    # gatus expands environment variables in its config, which is how the
+    # push token reaches external-endpoints without landing in the Nix store.
+    # Upstream's environmentFile is read by systemd before credentials are
+    # set up, so the credential is exported by a wrapper instead.
+    ImportCredential = [ "gatus-push-token" ];
+    ExecStart = lib.mkForce (
+      pkgs.writeShellScript "gatus-start" ''
+        GATUS_PUSH_TOKEN=$(< "$CREDENTIALS_DIRECTORY/gatus-push-token")
+        export GATUS_PUSH_TOKEN
+        exec ${lib.getExe config.services.gatus.package}
+      ''
+    );
     StandardOutput = "journal+console";
     StandardError = "journal+console";
   };
