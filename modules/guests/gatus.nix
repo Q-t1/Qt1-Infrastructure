@@ -1,9 +1,15 @@
 # Host side of the gatus guest: the VM entry, its public vhost on the
-# WAN-facing caddy, and the endpoints it checks — derived from the other
-# guests' own options, so a service added elsewhere in this repo shows up on
-# the status page without being listed twice. See ../../guests/gatus.nix for
+# WAN-facing caddy, the endpoints it checks — derived from the other guests'
+# own options, so a service added elsewhere in this repo shows up on the
+# status page without being listed twice — and the host-side timer that
+# pushes each microVM's systemd state to it. See ../../guests/gatus.nix for
 # the guest's own configuration.
-{ config, lib, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 
 let
   infraLib = import ../../lib.nix { inherit lib; };
@@ -70,6 +76,41 @@ let
     conditions = [ "[STATUS] < 400" ];
     ui = hideInternals;
   }) (lib.optionalAttrs caddyInternal.enable caddyInternal.urls);
+
+  # Each microVM's `microvm@<name>` unit, as the host's systemd sees it. The
+  # guest can't see that from inside, so these are gatus *external*
+  # endpoints: the host pushes their results (gatus-push-microvms, below)
+  # and gatus only stores and shows them. The heartbeat marks one down when
+  # nothing arrives for five pushes in a row, so a stalled pusher shows up
+  # red rather than as a stale green.
+  microvmGroup = "MicroVMs";
+  microvmEndpoints = map (vm: {
+    name = vm;
+    group = microvmGroup;
+    # Expanded by gatus from its environment; see guests/gatus.nix.
+    token = "\${GATUS_PUSH_TOKEN}";
+    heartbeat.interval = "5m";
+  }) cfg.microvms;
+
+  # The key gatus files an endpoint under, `<group>_<name>`, which is what
+  # its push API is addressed by. Must match gatus's own key.sanitize
+  # (config/key/key.go).
+  gatusKey =
+    let
+      sanitize =
+        s:
+        lib.replaceStrings [
+          "/"
+          "_"
+          "."
+          ","
+          " "
+          "#"
+          "+"
+          "&"
+        ] (lib.genList (_: "-") 8) (lib.toLower (lib.trim s));
+    in
+    group: name: "${sanitize group}_${sanitize name}";
 in
 {
   options.qt1.infra.guests.gatus =
@@ -116,6 +157,37 @@ in
           `ui.hide-url` and friends on anything internal.
         '';
       };
+
+      microvms = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = lib.remove "gatus" config.microvm.autostart;
+        defaultText = lib.literalExpression ''lib.remove "gatus" config.microvm.autostart'';
+        example = [
+          "caddy"
+          "headscale"
+        ];
+        description = ''
+          microVMs whose `microvm@<name>` unit is shown on the status page,
+          under "MicroVMs": up while the host's systemd reports the unit
+          `active`, down otherwise. Defaults to every VM the host starts at
+          boot, declared by this repo or not, except gatus itself — its page
+          is down whenever it is. Each name is shown publicly.
+        '';
+      };
+
+      pushTokenFile = lib.mkOption {
+        type = lib.types.str;
+        default = "/var/lib/microvms/gatus/push-token";
+        description = ''
+          Host path holding the bearer token the host pushes microVM states
+          to gatus with (see `microvms`), generated the first time this path
+          doesn't exist (gatus-provision-secrets, see ../../lib.nix) and
+          passed into the guest as a systemd credential. gatus's push API is
+          reachable through the public caddy too, so this token is all that
+          keeps anyone else from writing results. Delete it and restart
+          gatus-provision-secrets and microvm@gatus to rotate it.
+        '';
+      };
     };
 
   config = lib.mkIf cfg.enable (
@@ -126,6 +198,7 @@ in
         module = import ../../guests/gatus.nix {
           proxyAddress = caddy.address;
           endpoints = [ headscaleEndpoint ] ++ tailnetEndpoints ++ cfg.endpoints;
+          externalEndpoints = microvmEndpoints;
           # Names the checks above use that must resolve over the bridge
           # rather than through public DNS.
           hosts = {
@@ -135,6 +208,77 @@ in
             ${caddyInternal.address} = map (label: "${label}.${headscale.baseDomain}") (
               lib.attrNames caddyInternal.virtualHosts
             );
+          };
+        };
+        credentialFiles.gatus-push-token = cfg.pushTokenFile;
+      })
+
+      (infraLib.provisionSecrets {
+        vm = "gatus";
+        description = "Generate the gatus guest's push token";
+        path = [
+          pkgs.openssl
+          pkgs.coreutils
+        ];
+        secrets.${cfg.pushTokenFile} = ''
+          openssl rand -hex 32 > "$f"
+        '';
+      })
+
+      (lib.mkIf (cfg.microvms != [ ]) {
+        # Pushes each microvm@ unit's state to its external endpoint, over
+        # the bridge (the guest opens its port to the host for this). Every
+        # minute, a fifth of the heartbeat above. A failed push — gatus down
+        # or still booting — fails the run, and the next one tries again.
+        systemd.services.gatus-push-microvms = {
+          description = "Push the microVMs' systemd state to the gatus status page";
+          after = [ "gatus-provision-secrets.service" ];
+          path = [
+            pkgs.curl
+            config.systemd.package
+          ];
+          serviceConfig = {
+            Type = "oneshot";
+            DynamicUser = true;
+            LoadCredential = [ "push-token:${cfg.pushTokenFile}" ];
+          };
+          script = ''
+            token=$(< "$CREDENTIALS_DIRECTORY/push-token")
+            rc=0
+
+            # push <key> <curl args...>. The token goes in as a header file,
+            # never on curl's command line.
+            push() {
+              local key=$1
+              shift
+              curl --silent --show-error --fail --max-time 10 --get --request POST \
+                --header @<(printf 'Authorization: Bearer %s\n' "$token") \
+                "$@" "http://${cfg.address}:${toString webPort}/api/v1/endpoints/$key/external" \
+                >/dev/null || rc=1
+            }
+
+          ''
+          + lib.concatMapStrings (vm: ''
+            state=$(systemctl is-active ${lib.escapeShellArg "microvm@${vm}.service"} || true)
+            if [ "$state" = active ]; then
+              push ${gatusKey microvmGroup vm} --data-urlencode success=true
+            else
+              push ${gatusKey microvmGroup vm} --data-urlencode success=false \
+                --data-urlencode "error=unit is $state"
+            fi
+          '') cfg.microvms
+          + ''
+
+            exit "$rc"
+          '';
+        };
+
+        systemd.timers.gatus-push-microvms = {
+          wantedBy = [ "timers.target" ];
+          timerConfig = {
+            OnBootSec = "1m";
+            OnUnitActiveSec = "1m";
+            AccuracySec = "5s";
           };
         };
       })
