@@ -30,6 +30,25 @@ in
         '';
       };
 
+      virtualHosts = lib.mkOption {
+        type = lib.types.attrsOf lib.types.str;
+        default = { };
+        example = {
+          "status.example.com" = "10.100.0.6:8080";
+        };
+        description = ''
+          Public sites to serve besides headscale's, as
+          `hostname = "upstream-host:port"`. Each is reachable from the
+          internet, with a Let's Encrypt certificate of its own, and needs a
+          DNS record pointing at this host's WAN address. Guests set their
+          own entry here (see modules/guests/gatus.nix), and open their port
+          to this guest's `address` only.
+
+          Anything added here is published to the internet — an internal app
+          belongs on qt1.infra.guests.caddyInternal instead.
+        '';
+      };
+
       metricsFromMonitoring = lib.mkOption {
         type = lib.types.bool;
         default = false;
@@ -66,7 +85,7 @@ in
         name = "caddy";
         inherit cfg;
         module = import ../../guests/caddy.nix {
-          inherit (cfg) letsEncryptEmail;
+          inherit (cfg) letsEncryptEmail virtualHosts;
           hostname = headscale.tlsHostname;
           upstream = "${headscale.address}:${toString headscale.internalPort}";
           # A plain conditional, not lib.mkIf: this is a function argument to
@@ -84,6 +103,10 @@ in
           {
             assertion = headscale.enable;
             message = "qt1.infra.guests.caddy requires qt1.infra.guests.headscale.enable — it exists to front it.";
+          }
+          {
+            assertion = !(cfg.virtualHosts ? ${headscale.tlsHostname});
+            message = "qt1.infra.guests.caddy.virtualHosts must not contain `${headscale.tlsHostname}` — that hostname is headscale's own.";
           }
         ];
 

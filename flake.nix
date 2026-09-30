@@ -54,6 +54,7 @@
             ./modules/guests/caddy-internal.nix
             ./modules/crowdsec.nix
             ./modules/guests/monitoring.nix
+            ./modules/guests/gatus.nix
           ];
         };
       };

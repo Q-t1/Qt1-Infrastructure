@@ -6,6 +6,10 @@
 # ../modules/guests/caddy.nix and headscale's own guest config
 # (../guests/headscale.nix).
 #
+# It also serves whatever other public sites the guests register in
+# qt1.infra.guests.caddy.virtualHosts (the gatus status page), each with its
+# own certificate — see the `virtualHosts` argument below.
+#
 # Its Prometheus metrics (request rates, latency histograms, in-flight
 # requests) are served on a port of their own, for the monitoring guest
 # alone, and only when it asks for them — see the `metrics` argument below
@@ -29,6 +33,9 @@
   hostname,
   upstream,
   letsEncryptEmail,
+  # `hostname = "upstream-host:port"`, as qt1.infra.guests.caddy.virtualHosts:
+  # public sites besides headscale's.
+  virtualHosts ? { },
   # `{ port = <n>; from = "<address>"; }` when the monitoring guest scrapes
   # this one (qt1.infra.guests.caddy.metricsFromMonitoring), `{ }` otherwise:
   # it gates the whole metrics listener below, collection included.
@@ -63,34 +70,44 @@
   services.caddy = {
     enable = true;
     email = letsEncryptEmail;
-    virtualHosts.${hostname} = {
-      # The access log, and the one thing that gives qt1.infra.crowdsec
-      # (../modules/crowdsec.nix) something to read: to this guest's stdout,
-      # captured like everything else here (see
-      # systemd.services.caddy.serviceConfig above) — mirrored to the guest's
-      # console and from there to the host's journal.
-      #
-      # It has to be this option — the vhost's own logger — and not a `log`
-      # directive in extraConfig below. A bare `log` points the access log at
-      # caddy's *default* logger, which services.caddy pins at level ERROR,
-      # and access entries are INFO: caddy then silently logs nothing, while
-      # the module's own per-vhost default keeps writing them to a file under
-      # /var/log/caddy inside this guest's tmpfs root, where nothing can read
-      # them and they grow in RAM. Verified against the adapted config: the
-      # vhost had two loggers, the file one and the muted default.
+    virtualHosts = {
+      ${hostname} = {
+        # The access log, and the one thing that gives qt1.infra.crowdsec
+        # (../modules/crowdsec.nix) something to read: to this guest's stdout,
+        # captured like everything else here (see
+        # systemd.services.caddy.serviceConfig above) — mirrored to the guest's
+        # console and from there to the host's journal.
+        #
+        # It has to be this option — the vhost's own logger — and not a `log`
+        # directive in extraConfig below. A bare `log` points the access log at
+        # caddy's *default* logger, which services.caddy pins at level ERROR,
+        # and access entries are INFO: caddy then silently logs nothing, while
+        # the module's own per-vhost default keeps writing them to a file under
+        # /var/log/caddy inside this guest's tmpfs root, where nothing can read
+        # them and they grow in RAM. Verified against the adapted config: the
+        # vhost had two loggers, the file one and the muted default.
+        logFormat = "output stdout";
+        extraConfig = ''
+          # headscale's REST API (/api/v1/*) is bearer-token gated on its own,
+          # but that's not the same as being off the public internet — this is
+          # what actually keeps it off: never proxied, full stop. Use SSH + the
+          # local `headscale` CLI (see the README) for anything that would
+          # otherwise need this from outside the bridge.
+          @blocked path /api/*
+          respond @blocked 404
+
+          reverse_proxy ${upstream}
+        '';
+      };
+    }
+    # Every other public site: a plain reverse proxy, logged the same way as
+    # headscale's above so CrowdSec reads its access log too.
+    // lib.mapAttrs (_: siteUpstream: {
       logFormat = "output stdout";
       extraConfig = ''
-        # headscale's REST API (/api/v1/*) is bearer-token gated on its own,
-        # but that's not the same as being off the public internet — this is
-        # what actually keeps it off: never proxied, full stop. Use SSH + the
-        # local `headscale` CLI (see the README) for anything that would
-        # otherwise need this from outside the bridge.
-        @blocked path /api/*
-        respond @blocked 404
-
-        reverse_proxy ${upstream}
+        reverse_proxy ${siteUpstream}
       '';
-    };
+    }) virtualHosts;
 
     # Prometheus metrics, when the monitoring guest collects them. Two halves:
     #
