@@ -1,9 +1,3 @@
-# Host side of the gatus guest: the VM entry, its public vhost on the
-# WAN-facing caddy, the endpoints it checks — derived from the other guests'
-# own options, so a service added elsewhere in this repo shows up on the
-# status page without being listed twice — and the host-side timer that
-# pushes each microVM's systemd state to it. See ../../guests/gatus.nix for
-# the guest's own configuration.
 {
   config,
   lib,
@@ -21,11 +15,7 @@ let
   # Must match guests/gatus.nix.
   webPort = 8080;
 
-  # The status page is public, so nothing on it names an internal address,
-  # port or hostname — only each endpoint's name, its conditions and whether
-  # they held. Errors go too: a failed check's error reads
-  # `dial tcp 10.100.0.5:443: ...`. Read them in `journalctl -u
-  # microvm@gatus` on the host instead.
+  # The page is public; errors leak addresses too (`dial tcp 10.100.0.5:443`).
   hideInternals = {
     hide-hostname = true;
     hide-url = true;
@@ -33,11 +23,6 @@ let
     hide-errors = true;
   };
 
-  # headscale through the WAN-facing caddy: the same TLS certificate and
-  # proxy every Tailscale client goes through. /health answers 200 when
-  # headscale can reach its own database, 500 otherwise. The hostname
-  # resolves to caddy's bridge address inside the guest (see
-  # guests/gatus.nix), not out through the WAN and back in.
   headscaleEndpoint = {
     name = "Headscale";
     group = "Public";
@@ -46,55 +31,33 @@ let
     conditions = [
       "[STATUS] == 200"
       "[BODY].status == pass"
-      # Caddy renews once a third of the lifetime is left (a month, for
-      # today's 90-day certificates), so a week left means renewal has been
-      # failing for weeks.
+      # Caddy renews at a third of the lifetime left; under a week means renewal is failing.
       "[CERTIFICATE_EXPIRATION] > 168h"
     ];
     ui = hideInternals;
   };
 
-  # Every app on caddy-internal, at the URL a tailnet client uses, but reached
-  # over the bridge: the names resolve to caddy-internal's bridge address
-  # inside the guest, and caddy-internal opens 443 to this guest for it
-  # (probesFromGatus). That checks proxy and app together, the way a
-  # browser sees them.
-  #
-  # Certificate verification is off for these: they are issued by
-  # caddy-internal's own local CA, generated at runtime, which this guest has
-  # no copy of. The hop is one bridge hop, and what's checked is
-  # reachability, not identity.
   tailnetEndpoints = lib.mapAttrsToList (label: url: {
     name = label;
     group = "Tailnet";
     inherit url;
     interval = "1m";
+    # Signed by caddy-internal's runtime local CA, which this guest has no copy of.
     client.insecure = true;
-    # Redirects are followed (Grafana's `/` sends you to /login), so this is
-    # the status of the page a browser would land on. A 502 here is caddy
-    # saying the app behind it is down.
     conditions = [ "[STATUS] < 400" ];
     ui = hideInternals;
   }) (lib.optionalAttrs caddyInternal.enable caddyInternal.urls);
 
-  # Each microVM's `microvm@<name>` unit, as the host's systemd sees it. The
-  # guest can't see that from inside, so these are gatus *external*
-  # endpoints: the host pushes their results (gatus-push-microvms, below)
-  # and gatus only stores and shows them. The heartbeat marks one down when
-  # nothing arrives for five pushes in a row, so a stalled pusher shows up
-  # red rather than as a stale green.
   microvmGroup = "MicroVMs";
   microvmEndpoints = map (vm: {
     name = vm;
     group = microvmGroup;
-    # Expanded by gatus from its environment; see guests/gatus.nix.
     token = "\${GATUS_PUSH_TOKEN}";
     heartbeat.interval = "5m";
   }) cfg.microvms;
 
-  # The key gatus files an endpoint under, `<group>_<name>`, which is what
-  # its push API is addressed by. Must match gatus's own key.sanitize
-  # (config/key/key.go).
+  # `<group>_<name>`, the push API's address. Must match gatus's
+  # key.sanitize (config/key/key.go).
   gatusKey =
     let
       sanitize =
@@ -199,8 +162,6 @@ in
           proxyAddress = caddy.address;
           endpoints = [ headscaleEndpoint ] ++ tailnetEndpoints ++ cfg.endpoints;
           externalEndpoints = microvmEndpoints;
-          # Names the checks above use that must resolve over the bridge
-          # rather than through public DNS.
           hosts = {
             ${caddy.address} = [ headscale.tlsHostname ];
           }
@@ -226,10 +187,6 @@ in
       })
 
       (lib.mkIf (cfg.microvms != [ ]) {
-        # Pushes each microvm@ unit's state to its external endpoint, over
-        # the bridge (the guest opens its port to the host for this). Every
-        # minute, a fifth of the heartbeat above. A failed push — gatus down
-        # or still booting — fails the run, and the next one tries again.
         systemd.services.gatus-push-microvms = {
           description = "Push the microVMs' systemd state to the gatus status page";
           after = [ "gatus-provision-secrets.service" ];
@@ -246,8 +203,7 @@ in
             token=$(< "$CREDENTIALS_DIRECTORY/push-token")
             rc=0
 
-            # push <key> <curl args...>. The token goes in as a header file,
-            # never on curl's command line.
+            # Token via a header file, never on curl's command line.
             push() {
               local key=$1
               shift
@@ -292,9 +248,6 @@ in
         ];
 
         qt1.infra.guests.caddy.virtualHosts.${cfg.hostname} = "${cfg.address}:${toString webPort}";
-
-        # Opens caddy-internal's 443 to this guest, for the tailnet checks
-        # above. Only does anything when caddy-internal is itself enabled.
         qt1.infra.guests.caddyInternal.probesFromGatus = true;
       }
     ]

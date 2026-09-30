@@ -1,8 +1,3 @@
-# Host side of the headscale guest: the VM entry and its two host-generated
-# credentials. No WAN port forwarding here — the caddy guest
-# (../modules/guests/caddy.nix) is what's actually reachable from the WAN
-# now; this one only needs to be reachable from caddy, over the bridge.
-# The guest's own configuration is ../../guests/headscale.nix.
 {
   config,
   lib,
@@ -263,8 +258,6 @@ in
             grpcPort
             ;
           adminSshKeys = host.adminSshKeys ++ cfg.adminSshKeys;
-          # A plain conditional, not lib.mkIf, for the same reason as
-          # caddy-internal's `metrics`: a function argument, not an option.
           headplane = lib.optionalAttrs cfg.headplane.enable {
             inherit (cfg.headplane) port;
             baseUrl = "https://${cfg.headplane.label}.${cfg.baseDomain}";
@@ -290,8 +283,7 @@ in
         ];
         secrets =
           lib.optionalAttrs cfg.headplane.enable {
-            # Exactly 32 characters, no trailing newline: Headplane rejects any
-            # other length.
+            # Headplane rejects anything but exactly 32 characters, no newline.
             ${cfg.headplane.cookieSecretFile} = ''
               printf '%s' "$(openssl rand -hex 16)" > "$f"
             '';
@@ -323,19 +315,11 @@ in
       })
 
       {
-        # The host's own tailnet join (qt1.infra.tailscaleClient, when
-        # enabled) points at this headscale by default.
         qt1.infra.tailscaleClient = {
           loginServerUrl = lib.mkDefault cfg.serverUrl;
           authKeyFile = lib.mkDefault cfg.tailscaleAuthKeyFile;
         };
 
-        # Mints the reusable pre-auth key any tailscaleClient can join with,
-        # instead of a human running `headscale preauthkeys create` by hand.
-        # Idempotent on tailscaleAuthKeyFile already existing, so this is a no-op
-        # after the first successful run; delete that file and restart this
-        # service to rotate it. Runs whenever headscale is enabled, whether or
-        # not anything currently consumes the key.
         systemd.services.headscale-mint-tailscale-authkey = {
           description = "Mint a reusable headscale pre-auth key for tailscaleClient";
           after = [ "microvm@headscale.service" ];
@@ -363,10 +347,7 @@ in
             ${infraLib.headscaleRemoteShell cfg}
 
             find_user_id() {
-              # headscale prints the bare JSON `null` (not `[]`) for an empty
-              # user list, e.g. on a genuinely fresh server before this script
-              # has created anyone yet — `(. // [])` normalizes that so `.[]`
-              # doesn't choke on it.
+              # An empty user list prints `null`, not `[]`.
               remote headscale users list --output json \
                 | jq -r --arg name ${lib.escapeShellArg cfg.tailnetUser} '(. // [])[] | select(.name == $name) | .id'
             }

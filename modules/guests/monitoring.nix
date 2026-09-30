@@ -1,15 +1,3 @@
-# Host side of the monitoring guest: the VM entry, its two host-generated
-# Grafana secrets, Grafana's vhost on caddy-internal, and the collection that
-# actually feeds it (node_exporter for metrics, Grafana Alloy for logs, the
-# host's own CrowdSec metrics, and the scrape targets for the two caddy
-# guests' HTTP metrics) — the guest itself only holds the storage/UI (Loki,
-# Prometheus, Grafana). See ../../guests/monitoring.nix for the guest's own
-# configuration and the reasoning behind bundling all three into one guest.
-#
-# Which of the three optional collections are on is decided here, by
-# headscaleMetrics / caddyMetrics / crowdsecMetrics: each one both switches on
-# whatever serves the data (a host exporter, a listener inside a caddy guest,
-# CrowdSec's own endpoint) and gates the dashboard that reads it.
 {
   config,
   lib,
@@ -26,9 +14,6 @@ let
   crowdsec = config.qt1.infra.crowdsec;
   cfg = config.qt1.infra.guests.monitoring;
 
-  # Both proxies, when they're enabled and serving metrics: each one's own
-  # bridge address and metrics port, labelled with the guest's name. See
-  # caddyMetrics.
   caddyExporters =
     lib.optional (cfg.caddyMetrics && caddy.enable) {
       instance = "caddy";
@@ -40,7 +25,6 @@ let
     };
 
   nodeExporterPort = 9100;
-  # prometheus-tailscale-exporter's own default port.
   headscaleExporterPort = 9250;
   # Must match guests/monitoring.nix.
   grafanaPort = 3000;
@@ -205,45 +189,26 @@ in
       })
 
       (lib.mkIf cfg.headscaleMetrics {
-        # headscale's inventory only comes out of its gRPC admin API, so ask
-        # the headscale guest to serve it on the bridge — host-only, see that
-        # option's own docs.
         qt1.infra.guests.headscale.grpcFromHost = true;
 
-        # The exporter that turns that API into Prometheus metrics. Host-side
-        # like every other collector here, which also keeps the API key on the
-        # host instead of shipping it into a guest. Bridge-bound only, never
-        # the uplink/WAN interface.
         services.prometheus.exporters.tailscale = {
           enable = true;
           listenAddress = host.hostAddress;
           port = headscaleExporterPort;
           environmentFile = cfg.headscaleApiKeyFile;
         };
-        # The nixpkgs module documents environmentFile for Tailscale's own
-        # SaaS variables; headscale mode reads a different set. Only the API
-        # key among them is a secret, so the other two stay here rather than
-        # in the generated file.
+        # Only the API key is secret; the rest of headscale mode's settings stay here.
         systemd.services.prometheus-tailscale-exporter = {
           serviceConfig.Environment = [
             "HEADSCALE_ADDRESS=${headscale.address}:${toString headscale.grpcPort}"
-            # Plaintext gRPC: headscale holds no certificate of its own here.
-            # See qt1.infra.guests.headscale.grpcFromHost.
             "HEADSCALE_INSECURE=true"
           ];
-          # environmentFile doesn't exist until the unit below has minted the
-          # key, and systemd refuses to start a unit whose EnvironmentFile is
-          # missing.
+          # systemd won't start a unit whose EnvironmentFile is missing.
           after = [ "monitoring-mint-headscale-apikey.service" ];
           requires = [ "monitoring-mint-headscale-apikey.service" ];
         };
         networking.firewall.interfaces.${host.bridge}.allowedTCPPorts = [ headscaleExporterPort ];
 
-        # Mints the exporter's API key instead of a human running `headscale
-        # apikeys create` by hand, the same way
-        # headscale-mint-tailscale-authkey mints the pre-auth key. Idempotent
-        # on the file already existing, so this is a no-op after the first
-        # successful run.
         systemd.services.monitoring-mint-headscale-apikey = {
           description = "Mint a headscale API key for the metrics exporter";
           after = [ "microvm@headscale.service" ];
@@ -269,11 +234,7 @@ in
 
             ${infraLib.headscaleRemoteShell headscale}
 
-            # Prometheus-style duration; headscale's own default is 90d,
-            # which would silently stop the exporter a quarter after every
-            # fresh deploy. Read-only inventory over a host-only socket, so
-            # a long-lived key is the right trade here — as with the
-            # pre-auth key, rotate by deleting the file.
+            # headscale's 90d default would silently stop the exporter.
             key=$(remote headscale apikeys create --expiration 10y)
 
             install -d -m 0755 "$(dirname "$dest")"
@@ -287,20 +248,11 @@ in
       })
 
       (lib.mkIf cfg.caddyMetrics {
-        # Ask both proxies to serve their HTTP metrics on the bridge, for this
-        # guest's address only — see each guest's own
-        # metricsFromMonitoring. Set for both unconditionally: the option
-        # only does anything inside a guest that is itself enabled, and
-        # caddyExporters (above) is what decides which ones get scraped.
         qt1.infra.guests.caddy.metricsFromMonitoring = true;
         qt1.infra.guests.caddyInternal.metricsFromMonitoring = true;
       })
 
       (lib.mkIf cfg.crowdsecMetrics {
-        # Same shape, for the host's own CrowdSec: it already exposes these
-        # metrics, on loopback, so all this does is move the listener to the
-        # bridge. No firewall rule here — qt1.infra.crowdsec owns that one,
-        # next to the listener it opens.
         qt1.infra.crowdsec.metricsFromGuests = true;
       })
 
@@ -323,9 +275,6 @@ in
         qt1.infra.guests.caddyInternal.virtualHosts.${cfg.grafanaLabel} =
           "${cfg.address}:${toString grafanaPort}";
 
-        # Host-side metrics collection: a plain node_exporter, bridge-bound only
-        # (never the uplink/WAN interface), scraped by Prometheus inside the
-        # monitoring guest.
         services.prometheus.exporters.node = {
           enable = true;
           listenAddress = host.hostAddress;
@@ -333,22 +282,9 @@ in
         };
         networking.firewall.interfaces.${host.bridge}.allowedTCPPorts = [ nodeExporterPort ];
 
-        # Host-side log collection: Grafana Alloy (services.promtail was removed
-        # upstream — EOL — this is its nixpkgs-blessed replacement) tails the
-        # whole host journal and pushes it to the monitoring guest's Loki. This
-        # is the same host journal crowdsec.nix already reads from (caddy's
-        # access log and crowdsec's own logs both land there); headscale's own
-        # application logs don't, since it never mirrors its console to the host
-        # journal the way caddy does — out of scope for this pass.
         services.alloy.enable = true;
         environment.etc."alloy/config.alloy".text = ''
-          // Keep each entry's systemd unit as a label. Without this the whole
-          // host journal arrives under `job="host"` and nothing downstream can
-          // tell caddy's access log from crowdsec's decisions from a kernel
-          // message — which is exactly what the caddy and crowdsec dashboards'
-          // log panels select on. Bounded cardinality: it's one value per unit
-          // that has ever logged. journald's own fields arrive prefixed with
-          // __journal_ and are dropped unless promoted like this.
+          // Promote the systemd unit to a `unit` label; the dashboards' log panels select on it.
           loki.relabel "journal" {
             forward_to = []
 

@@ -1,6 +1,3 @@
-# Host side of the caddy guest: the VM entry and the WAN port forwarding
-# that makes it reachable — caddy is now what needs real inbound ports,
-# not headscale (see ../../guests/caddy.nix and modules/guests/headscale.nix).
 {
   config,
   lib,
@@ -88,9 +85,6 @@ in
           inherit (cfg) letsEncryptEmail virtualHosts;
           hostname = headscale.tlsHostname;
           upstream = "${headscale.address}:${toString headscale.internalPort}";
-          # A plain conditional, not lib.mkIf: this is a function argument to
-          # the guest module, not an option definition — an mkIf here would
-          # arrive as an attrset the guest cannot read.
           metrics = lib.optionalAttrs cfg.metricsFromMonitoring {
             port = cfg.metricsPort;
             from = monitoring.address;
@@ -110,13 +104,8 @@ in
           }
         ];
 
-        # The host's own tailnet join reaches headscale through this guest
-        # over the bridge (see the README's "Joining the tailnet").
         qt1.infra.tailscaleClient.loginServerAddress = lib.mkDefault cfg.address;
 
-        # Real inbound ports: caddy is now the WAN-facing TLS terminator,
-        # headscale itself no longer needs any (see
-        # modules/guests/headscale.nix).
         networking.nat.forwardPorts = [
           {
             sourcePort = 80;

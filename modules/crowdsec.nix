@@ -1,16 +1,3 @@
-# Host-side CrowdSec: watches the caddy guest's mirrored console log for
-# the scenarios in the crowdsecurity/caddy hub collection (bruteforce,
-# scanners, common HTTP attacks) and bans offending IPs with the local
-# firewall bouncer.
-#
-# Lives on the host, not as its own microVM. Two things make the host the
-# only sane place for this: caddy has no SSH and no log file of its own —
-# its logs only ever land in the host's journal, mirrored via its console
-# (see guests/caddy.nix and the README's "caddy guest" section) — and
-# banning an IP means touching the host's own WAN-facing NAT/forwardPorts
-# (modules/microvm-host.nix), which only the host owns. A separate guest
-# would need both shipped to it and bans shipped back, for no isolation
-# benefit.
 {
   config,
   lib,
@@ -23,31 +10,19 @@ let
   host = config.qt1.infra.microvmHost;
   caddy = config.qt1.infra.guests.caddy;
 
-  # Mirrors the same condition services.crowdsec-firewall-bouncer.settings.mode
-  # picks its default from, so our own ruleset (below) stays in step with
-  # whichever backend the host actually uses.
   usingNftables = config.networking.nftables.enable;
 
-  # The same pkgs.formats.yaml{}.generate call upstream's own crowdsec.nix
-  # makes internally for services.crowdsec.settings.general — regenerated
-  # here (rather than read back from upstream, which keeps it as a
-  # private `let` binding, not a reachable option) purely to give raw
-  # `cscli` invocations a valid config at their conventional default path;
-  # see the comment below on crowdsec-firewall-bouncer-register.service.
+  # Upstream keeps this private; regenerated so raw `cscli` finds /etc/crowdsec/config.yaml.
   crowdsecConfigFile =
     (pkgs.formats.yaml { }).generate "crowdsec.yaml"
       config.services.crowdsec.settings.general;
 
-  # Every localConfig file upstream links into /etc/crowdsec, as
-  # `link path -> store path`. Read back from upstream's tmpfiles rules (a
-  # reachable option, unlike the let bindings that build them), which are
-  # its only `L+` entries.
+  # Upstream's only `L+` tmpfiles rules: link -> store path.
   localConfigLinks = lib.mapAttrs (_: rule: rule.link.argument) (
     lib.filterAttrs (_: rule: rule ? link) config.systemd.tmpfiles.settings."10-crowdsec"
   );
 
-  # The directories those links go in. Upstream keeps them in private let
-  # bindings, so they're repeated here, the same way crowdsecConfigFile is.
+  # Upstream keeps these private too.
   localConfigDirs = map (dir: "/etc/crowdsec/${dir}") [
     "scenarios"
     "parsers/s00-raw"
@@ -58,10 +33,8 @@ let
     "notifications"
   ];
 
-  # Makes the links in localConfigDirs match localConfigLinks exactly: removes
-  # every link into /nix/store the current config doesn't list, and (re)creates
-  # every one it does. Links into the hub (/var/lib/crowdsec/state/hub) and
-  # anything that isn't a symlink are left alone. See the ExecStartPre below.
+  # Makes the /nix/store links in localConfigDirs match localConfigLinks exactly;
+  # hub links and non-symlinks are left alone.
   syncLocalConfigLinks = pkgs.writeShellScript "crowdsec-sync-local-config" ''
     set -euo pipefail
     declare -A want=(
@@ -149,72 +122,23 @@ in
       enable = true;
       hub.collections = cfg.collections;
 
-      # crowdsec registers its GeoIpCity/GeoIpASN enrichers at startup no
-      # matter what, but the databases they read (GeoLite2-City.mmdb,
-      # GeoLite2-ASN.mmdb, in the data dir) are only ever downloaded as the
-      # data files of this hub parser. It normally comes in through
-      # crowdsecurity/linux, which the caddy collection does not depend on,
-      # so without it here the agent logged "unable to open
-      # GeoLite2-City.mmdb" on every start and alerts carried no country,
-      # AS or source range. Source-agnostic: it enriches any event with a
-      # public source_ip (it skips private and loopback ranges itself), so
-      # it needs no acquisition of its own, unlike cfg.collections.
+      # The GeoIP enrichers always run, but their mmdb files only ship with this
+      # parser (normally pulled in by crowdsecurity/linux, which caddy doesn't need).
       hub.parsers = [ "crowdsecurity/geoip-enrich" ];
 
       localConfig.acquisitions = [
         {
           source = "journalctl";
-          # Caddy's own stdout/stderr are mirrored to its console (see
-          # guests/caddy.nix's StandardOutput/StandardError), which is what
-          # lands here: the host's journal, under the unit QEMU's serial
-          # console feeds — the same stream the README already points a
-          # human at with `journalctl -u microvm@caddy`.
           journalctl_filter = [ "_SYSTEMD_UNIT=microvm@caddy.service" ];
           labels.type = "caddy";
         }
       ];
 
-      # The one parser that makes any of the above produce an event, and it
-      # has two jobs — both of which have to happen before
-      # crowdsecurity/caddy-logs (s01-parse) can do anything:
-      #
-      #  1. Strip everything in front of caddy's JSON. caddy-logs unmarshals
-      #     the line as JSON, and a prefixed line is not JSON. There are two
-      #     layers of prefix. The acquisition reads the caddy guest's mirrored
-      #     console, which wraps each line as
-      #     `[   12.345678] caddy[480]: {"level":...}`. Then the journalctl
-      #     source runs `journalctl --follow` with no `-o`, so the host's
-      #     journal adds its default `short` header in front of that:
-      #     `Sep 29 22:30:44 homelab-1 microvm@caddy[702795]: [   12.345678] ...`.
-      #     Both are optional in the pattern, so a line that ever arrives with
-      #     either one missing (or bare) parses too.
-      #
-      #     The first version only stripped the console prefix, anchored at
-      #     the start of the line. The journal header sat in front of it, so
-      #     the whole line went through as the message and every live line
-      #     failed caddy-logs. It passed `cscli explain` because the test line
-      #     had been copied without that header.
-      #
-      #  2. Set evt.Parsed.message and evt.Parsed.program, which is what
-      #     caddy-logs actually filters on (`evt.Parsed.program startsWith
-      #     'caddy'`). Normally crowdsecurity/non-syslog does this, but that
-      #     parser ships inside crowdsecurity/syslog-logs, which the
-      #     crowdsecurity/caddy collection does not depend on: the collection
-      #     installs caddy-logs (s01) and http-logs (s02) and nothing in
-      #     s00-raw at all. Without this, every line failed the very first
-      #     stage even when it was clean JSON.
-      #
-      # Ordering is safe: crowdsec sorts parsers by their path, this is the
-      # only thing in s00-raw, and the name the nixpkgs module gives it
-      # (parsers-s00-raw.yaml) sorts ahead of anything a hub collection would
-      # install beside it.
-      #
-      # Verified with `cscli explain` against a real line off this host: the
-      # chain now reaches s01-parse, s02-enrich and the scenarios
-      # (http-probing, http-sensitive-files, http-crawl-non_statics on a 404
-      # probe), and a systemd line from the same console still fails
-      # caddy-logs — i.e. it stays counted as unparsed instead of becoming a
-      # bogus event.
+      # crowdsecurity/caddy ships nothing for s00-raw, yet caddy-logs needs
+      # evt.Parsed.program and .message (normally set by crowdsecurity/non-syslog).
+      # Lines also arrive wrapped twice: the journal's `short` header, then the
+      # serial-console prefix. Both are stripped, each optionally. Test with a line
+      # that includes the journal header, since that's what the live agent sees.
       localConfig.parsers.s00Raw = [
         {
           name = "qt1/microvm-console";
@@ -242,171 +166,39 @@ in
         }
       ];
 
-      # Needed for the firewall bouncer below to authenticate against a
-      # local API at all; stays loopback-only (127.0.0.1:8080 by default),
-      # never reachable from the guest bridge or the WAN.
       settings.general.api.server.enable = true;
 
-      # With a local API running, crowdsec is also that API's own first
-      # client (it self-registers as a "machine" via `cscli machine add
-      # --auto` the first time this file doesn't exist) — mandatory once
-      # api.server.enable is true, upstream has no default for it.
-      #
-      # Must live under state/, not directly in /var/lib/crowdsec: the
-      # crowdsec user only owns the subdirectories upstream's own tmpfiles
-      # rules create (state/, hub/, ...) — the bare rootDir stays
-      # root:root 0755, so a file placed straight in it fails to write
-      # with EACCES the first time crowdsec tries to create it.
+      # Under state/: the crowdsec user can't write the root-owned rootDir itself.
       settings.lapi.credentialsFile = "/var/lib/crowdsec/state/local_api_credentials.yaml";
 
-      # Where CrowdSec serves its own Prometheus metrics. Upstream already
-      # enables that endpoint, at the "full" level which carries
-      # cs_active_decisions and the per-bouncer LAPI counters, but binds it to
-      # 127.0.0.1 — unreachable for the Prometheus that scrapes it, which runs
-      # inside the monitoring guest on the other side of the bridge. See
-      # metricsFromGuests, which qt1.infra.guests.monitoring sets.
-      #
-      # All interfaces rather than the bridge address, with the firewall rule
-      # below as the thing that actually scopes it — the same trade Grafana
-      # makes inside its own guest. Binding the bridge address would be a
-      # boot-order gamble this service cannot recover from: the host's
-      # networkd has wait-online disabled (it manages no uplink, see
-      # microvm-host.nix), so network-online.target doesn't wait for the
-      # bridge to get its address, and CrowdSec's metrics listener only logs
-      # "serving metrics" once and gives up if the bind fails — leaving the
-      # agent running with no metrics until someone restarts it.
+      # 0.0.0.0, not the bridge address: wait-online is off, and a failed bind
+      # leaves the agent without metrics until restarted. The firewall scopes it.
       settings.general.prometheus.listen_addr = lib.mkIf cfg.metricsFromGuests "0.0.0.0";
     };
 
-    # The one thing keeping that listener off the WAN: the port is opened on
-    # the bridge interface only, and the endpoint is unauthenticated (CrowdSec
-    # has nothing to gate it with). The host's firewall default-drops
-    # everywhere else, and nothing forwards a WAN port to the host itself.
     networking.firewall.interfaces.${host.bridge}.allowedTCPPorts = lib.mkIf cfg.metricsFromGuests [
       cfg.metricsPort
     ];
 
-    # Upstream declares crowdsec.service with plain ReadWritePaths for
-    # rootDir (/var/lib/crowdsec), relying on systemd.tmpfiles.settings to
-    # have already created it — but ReadWritePaths doesn't create missing
-    # paths itself, it hard-fails the unit if the target isn't already
-    # there ("Failed to set up mount namespacing: /var/lib/crowdsec: No
-    # such file or directory"), and whether tmpfiles has actually run for
-    # a brand new rule by the time this unit first starts isn't
-    # guaranteed on a `nixos-rebuild switch` that introduces both at once.
-    # StateDirectory= sidesteps that race entirely: it's created directly
-    # by PID1 as part of starting *this* unit, synchronously, every time —
-    # the same mechanism that (as it happens) reliably created this exact
-    # path for crowdsec-firewall-bouncer-register.service below, before it
-    # got scoped down to its own directory.
+    # ReadWritePaths fails the unit if rootDir doesn't exist yet; StateDirectory creates it.
     systemd.services.crowdsec.serviceConfig.StateDirectory = "crowdsec";
 
-    # Both units that claim that StateDirectory run as upstream's *static*
-    # crowdsec user (uid from users.users.crowdsec), yet upstream also sets
-    # DynamicUser = true on them. That combination gives two owners for one
-    # tree, and they disagree:
-    #
-    #  - DynamicUser moves the directory to /var/lib/private/crowdsec,
-    #    owned by `nobody` on disk, and mounts it *idmapped* into each unit
-    #    so that nobody reads as the service user inside. Everything
-    #    crowdsec or cscli creates there (crowdsec.db, state/trace, ...)
-    #    lands on disk as nobody.
-    #  - Upstream's tmpfiles rules for state/ and state/hub/ name the real
-    #    crowdsec user, and the `d` type re-chowns an existing directory.
-    #    On disk, crowdsec's uid is *not* what the idmapped mount maps, so
-    #    inside the units state/ then reads as someone else's 0750
-    #    directory: no way in.
-    #
-    # Nothing noticed for a week because tmpfiles only re-runs on a switch
-    # that changes some tmpfiles rule (or on boot). The first one after the
-    # move to private/ (the s00-raw parser's symlink) chowned state/ back to
-    # crowdsec and broke the register unit
-    # (`mkdir /var/lib/crowdsec/state/trace: permission denied`). The
-    # still-running crowdsec would have failed the same way on its next
-    # restart. The next tmpfiles run then hit the nobody-owned parent and
-    # refused ("Detected unsafe path transition").
-    #
-    # So these units drop DynamicUser. The user is static anyway, and every
-    # other sandboxing setting upstream applies stays. The state lives at a
-    # plain /var/lib/crowdsec, owned by crowdsec throughout, which is what
-    # the tmpfiles rules already assume. Migrating an existing host from
-    # /var/lib/private is a one-off manual step; see the README.
+    # Upstream pairs DynamicUser with a static user, and its tmpfiles rules chown
+    # state/ to that user, which breaks the idmapped /var/lib/private tree.
+    # Migrating a host off /var/lib/private: see the README.
     systemd.services.crowdsec.serviceConfig.DynamicUser = lib.mkForce false;
     systemd.services.crowdsec-firewall-bouncer-register.serviceConfig.DynamicUser = lib.mkForce false;
 
-    # Local parsers (and scenarios, etc.) reach crowdsec as tmpfiles
-    # symlinks under /etc/crowdsec, not through its unit or its config file.
-    # A switch that only changes one of them leaves the unit untouched, so
-    # the running agent never loads the change: c903e20's parser was
-    # deployed and then sat idle for exactly that reason.
+    # localConfig arrives as tmpfiles symlinks, which don't restart the unit.
     systemd.services.crowdsec.restartTriggers = [
       (builtins.toJSON config.services.crowdsec.localConfig)
     ];
 
-    # NOTE for readers of the git history: an earlier version of this file
-    # stripped "crowdsec" out of crowdsec-firewall-bouncer-register.service's
-    # own StateDirectory (upstream declares
-    # `StateDirectory = "crowdsec-firewall-bouncer-register crowdsec"`),
-    # reasoning that DynamicUser's StateDirectory machinery turning
-    # /var/lib/crowdsec into a symlink into the root-only /var/lib/private/
-    # was what broke crowdsec.service's own (then plain-ReadWritePaths-only)
-    # access to it. That diagnosis was half right: it fixed
-    # crowdsec.service, but on the wrong unit, and broke something this
-    # one separately needs it for. crowdsec.service now has its own
-    # StateDirectory = "crowdsec" (above), which is the actual, unit-scoped
-    # fix, and doesn't care what any other unit with the same claim does —
-    # so upstream's original declaration on this unit is safe to leave
-    # alone, and turns out to be required: `cscli`'s own trace-directory
-    # setup (unrelated to the bouncer-registration logic itself) also
-    # needs to resolve /var/lib/crowdsec, and without a StateDirectory of
-    # its own this unit has no way through that same symlink either
-    # (`Error: while setting up trace directory: mkdir /var/lib/crowdsec:
-    # file exists` — Go's os.MkdirAll can't tell "permission denied
-    # resolving the symlink" from "doesn't exist", tries plain Mkdir, gets
-    # EEXIST from the symlink's own dirent, and re-surfaces that error
-    # once its own fallback Lstat check sees a symlink instead of a
-    # directory).
-
-    # That same register unit's script also invokes the raw `cscli`
-    # binary directly — unlike every other cscli invocation here, which
-    # goes through services.crowdsec's own generated wrapper
-    # (environment.systemPackages) that always passes `-c=<the real
-    # config>`. Without it, cscli falls back to its conventional default,
-    # /etc/crowdsec/config.yaml, which NixOS's crowdsec module never
-    # actually writes there (the real config lives in the Nix store):
-    #   Error: while reading yaml file: open /etc/crowdsec/config.yaml: no such file or directory
-    #
-    # Fixed by symlinking that conventional path into place — but as an
-    # extra ExecStartPre on crowdsec.service itself (which already has
-    # /etc/crowdsec writable, and which the register unit is ordered
-    # after), not a separate systemd.tmpfiles rule: we just learned the
-    # hard way, fixing crowdsec.service's own StateDirectory above, that a
-    # brand new tmpfiles rule isn't guaranteed applied by the very switch
-    # that introduces it. This way there's nothing else to race.
-    #
-    # mkBefore, not a plain list append: upstream's own ExecStartPre
-    # commands (hub install, machine registration) run first otherwise,
-    # and systemd stops at the first ExecStartPre that fails — so an
-    # unrelated failure in *those* (e.g. a stale machine record from an
-    # earlier broken run) would silently keep this symlink from ever
-    # being created too, reproducing the exact error this exists to fix
-    # for no reason connected to it.
-    #
-    # The second command cleans up after upstream's own localConfig links.
-    # Upstream names each link after the store file it points to
-    # (`<hash>-parsers-s00-raw.yaml`), so every change to a local parser,
-    # scenario, etc. adds a new link beside the old one, and tmpfiles never
-    # removes the old one. Both then define the same name: crowdsec warns
-    # "multiple parsers named ...", keeps one of them, and nothing says it
-    # keeps the new one. That happened here after the s00-raw pattern fix:
-    # the pre-fix parser, which fails every line, sat next to its
-    # replacement until it was deleted by hand.
-    #
-    # It also (re)creates the links the current config wants, for the same
-    # race as config.yaml above: a switch that changes a local parser both
-    # restarts this unit (restartTriggers) and adds its tmpfiles rule, in no
-    # guaranteed order. Removing the stale link without creating the new one
-    # would leave crowdsec with no parser at all.
+    # - The register unit runs raw `cscli`, which reads /etc/crowdsec/config.yaml.
+    # - Upstream names localConfig links by store hash and never removes old ones,
+    #   leaving duplicate parsers after every change.
+    # Done here, not via tmpfiles, which a switch doesn't guarantee runs first.
+    # mkBefore so a failure in upstream's own ExecStartPre can't skip it.
     systemd.services.crowdsec.serviceConfig.ExecStartPre = lib.mkBefore [
       "${lib.getExe' pkgs.coreutils "ln"} -sf ${crowdsecConfigFile} /etc/crowdsec/config.yaml"
       "${syncLocalConfigLinks}"
@@ -415,55 +207,23 @@ in
     services.crowdsec-firewall-bouncer = {
       enable = true;
 
-      # In iptables mode the bouncer inserts its own DROP-if-blacklisted
-      # rule at the head of every chain listed here — ahead of whatever
-      # else already lives there, which is what makes the ordering below
-      # safe regardless of service start order.
-      #
-      # Crucially this must include FORWARD, not just the INPUT default:
-      # the WAN traffic this exists to block is never delivered to the
-      # host itself, it's FORWARDed on to the caddy guest by
-      # modules/microvm-host.nix's NAT (networking.nat.forwardPorts) — a
-      # rule only on INPUT would silently never fire.
+      # FORWARD too: WAN traffic to caddy is forwarded, never delivered to INPUT.
       settings.iptables_chains = [
         "INPUT"
         "FORWARD"
       ];
 
-      # nftables mode has no equivalent knob — the ruleset createRulesets
-      # would generate hooks `input` only (hardcoded upstream) — so hand
-      # it a ruleset of our own that hooks `forward` too, using the same
-      # table/set names the bouncer defaults to feeding.
+      # Upstream's nftables ruleset hooks input only; ours (below) adds forward.
       createRulesets = !usingNftables;
     };
 
-    # Upstream's crowdsec-firewall-bouncer.service `requires` the register
-    # unit above (it needs the API key that unit writes, loaded via
-    # LoadCredential) but never adds a matching `after` — `requires`
-    # alone is a failure-propagation dependency, not an ordering one, so
-    # systemd is free to start both in parallel. On a cold start that
-    # race can lose:
-    #   crowdsec-firewall-bouncer.service: Failed to set up credentials: No such file or directory
-    # (Failed at step CREDENTIALS, exit 243) — the bouncer trying to load
-    # a credential file the register unit hasn't written yet.
+    # Upstream `requires` the register unit without ordering after it, racing its credential.
     systemd.services.crowdsec-firewall-bouncer.after = [
       "crowdsec-firewall-bouncer-register.service"
     ];
 
-    # Upstream's register script, with one change: a failing `cscli bouncers
-    # list` now fails the unit. Upstream pipes it straight into `jq -e` and
-    # reads any failure as "not registered", then deletes the saved API key
-    # before trying `cscli bouncers add`. When cscli itself is what's broken,
-    # the add fails too, and the host is left with the bouncer registered in
-    # the LAPI but no key on disk. That fails every later run ("Bouncer
-    # registered but API key is not present"), and the bouncer can't start
-    # again until someone runs `cscli bouncers delete` by hand. It happened
-    # here with the permissions breakage described above: an unrelated
-    # cscli error turned into a bouncer outage at the next restart.
-    #
-    # Querying first, under the unit's `set -e`, means a cscli error stops
-    # the run before anything is deleted. The existing key stays, and the
-    # next run after the actual fix just finds it.
+    # Upstream's script, except a failing `cscli bouncers list` fails the unit
+    # instead of deleting the saved API key.
     systemd.services.crowdsec-firewall-bouncer-register.script =
       let
         bouncerName = config.services.crowdsec-firewall-bouncer.registerBouncer.bouncerName;

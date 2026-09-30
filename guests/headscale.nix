@@ -1,37 +1,3 @@
-# headscale: a self-hosted Tailscale coordination server. Built entirely
-# from nixpkgs' own `services.headscale` module — no Docker. Unlike the
-# guest this repo ran WAN-facing before it, TLS is no longer headscale's own
-# job: the caddy guest (../modules/guests/caddy.nix) terminates it and
-# reverse-proxies in, so headscale itself only listens plain HTTP on the
-# guest bridge (internalPort below) and is never reachable from the WAN
-# directly.
-#
-# /api/v1/* (headscale's REST API) is bearer-token gated (401 without a
-# valid API key), but that's now a second layer, not the only one: caddy's
-# own Caddyfile refuses to proxy /api/* at all, so it's not reachable from
-# the WAN full stop — no API key is ever provisioned ahead of time either
-# way, mint one on demand over SSH when actually needed (`headscale apikeys
-# create`). The gRPC admin API is not served remotely at all unless
-# grpcFromHost is set (see below), and was never forwarded from the WAN
-# regardless.
-#
-# Stateful: headscale's own node/key database and its Noise and DERP
-# private keys all live under /var/lib/headscale, a persistent volume —
-# none of it regenerates across guest restarts.
-#
-# SSH is enabled for root, key-only, and reachable only from the host (not
-# from other guests on the bridge or the WAN) — the `headscale` CLI (e.g.
-# `apikeys create`, `preauthkeys create`) talks to the running server over a
-# local unix socket, so it has to run on this guest itself. adminSshKeys
-# (humans plus the host's own default keys, see
-# qt1.infra.microvmHost.adminSshKeys) are authorized alongside a separate,
-# host-generated key for headscale-mint-tailscale-authkey to run unattended
-# (see ../modules/guests/headscale.nix).
-#
-# Built on ./base.nix (network coordinates under config.qt1.guest); called
-# with its public identity and SSH keys by the host-side module, since guests
-# are evaluated by microvm.nix in a nested nixosSystem that gets none of the
-# host's specialArgs.
 {
   serverUrl,
   baseDomain,
@@ -40,9 +6,6 @@
   magicDnsAliases,
   grpcFromHost,
   grpcPort,
-  # `{ port; baseUrl; from; }` when Headplane is enabled
-  # (qt1.infra.guests.headscale.headplane), `{ }` otherwise: `from` is
-  # caddy-internal's bridge address, the only thing let through to `port`.
   headplane ? { },
 }:
 
@@ -54,8 +17,6 @@
 }:
 
 let
-  # Watched by headscale itself (dns.extra_records_path), which reloads it on
-  # every change — no restart needed when an alias's target moves.
   extraRecordsFile = "/var/lib/headscale/extra-records.json";
   hasAliases = magicDnsAliases != { };
   hasHeadplane = headplane != { };
@@ -65,8 +26,6 @@ in
 {
   microvm = {
     vcpu = 2;
-    # Headplane is a Node.js server, which roughly doubles what headscale
-    # alone needs.
     mem = if hasHeadplane then 1024 else 512;
     volumes = [
       {
@@ -75,9 +34,6 @@ in
         size = 512;
       }
     ]
-    # Headplane's own database: its sessions and whatever it records about
-    # users. The root is tmpfs, so without this every guest restart would
-    # log everyone out.
     ++ lib.optional hasHeadplane {
       image = "headplane-data.img";
       mountPoint = config.services.headplane.settings.server.data_path;
@@ -85,39 +41,24 @@ in
     };
   };
 
-  # Only the plain-HTTP port caddy proxies to — bridge-only, since this
-  # guest is never in the host's forwardPorts.
   networking.firewall.allowedTCPPorts = [ internalPort ];
-  # SSH (admin access, for one-off `headscale` CLI commands) is not in
-  # allowedTCPPorts: it must only be reachable from the host, not from other
-  # guests on the bridge.
   qt1.guest.allowedTCPPortsFrom = [
     {
       port = 22;
       from = config.qt1.guest.gateway;
     }
   ]
-  # The gRPC admin API, when something on the host asks for it (currently
-  # only the headscale metrics exporter, see
-  # ../modules/guests/monitoring.nix). Same reasoning as SSH above: the host
-  # only, never the other guests on the bridge.
   ++ lib.optional grpcFromHost {
     port = grpcPort;
     from = config.qt1.guest.gateway;
   }
-  # Headplane, for caddy-internal only: that proxy is its one way in, and it
-  # only listens on the tailnet. Not the WAN-facing caddy, not the host, not
-  # the other guests.
   ++ lib.optional hasHeadplane {
     inherit (headplane) port from;
   };
 
   services.openssh = {
     enable = true;
-    # The root filesystem is tmpfs, so a generated host key would be
-    # regenerated (and change) on every VM restart. Use the one pinned by the
-    # host instead (see ../modules/guests/headscale.nix), imported the same
-    # way as the automation pubkey below.
+    # tmpfs root: use the host-pinned key so it doesn't change on every restart.
     hostKeys = lib.mkForce [ ];
     extraConfig = ''
       HostKey /run/credentials/sshd.service/ssh-host-ed25519-key
@@ -128,10 +69,6 @@ in
       KbdInteractiveAuthentication = false;
     };
   };
-  # authorizedKeysFiles is additive with the default NixOS sets from
-  # users.users.root.openssh.authorizedKeys.keys below, so root accepts any
-  # of: adminSshKeys, this credential for headscale-mint-tailscale-authkey
-  # running unattended on the host.
   services.openssh.authorizedKeysFiles = [ "/run/credentials/sshd.service/automation-ssh-pubkey" ];
   systemd.services.sshd.serviceConfig.ImportCredential = [
     "ssh-host-ed25519-key"
@@ -141,74 +78,41 @@ in
 
   services.headscale = {
     enable = true;
-    # Bridge-reachable (from the caddy guest specifically), not the WAN —
-    # caddy is what the WAN actually reaches. Plain HTTP: no TLS options
-    # here at all now, caddy owns that.
     address = "0.0.0.0";
     port = internalPort;
     settings = {
-      # Still the public https:// identity clients are told to use — caddy
-      # is just what actually answers for it now. headscale doesn't care
-      # that its own listener is plain HTTP as long as server_url matches
-      # what's reachable from the outside.
       server_url = serverUrl;
-      # Remote gRPC is only served at all when it has either a certificate
-      # or grpc_allow_insecure — headscale skips the listener otherwise, so
-      # leaving both unset (the default) is what keeps the admin API on its
-      # unix socket. Plaintext is deliberate here: headscale holds no
-      # certificate of its own (caddy terminates TLS in front of it) and the
-      # listener is firewalled to the host, one bridge hop away.
+      # headscale only serves remote gRPC with a certificate or
+      # grpc_allow_insecure; leaving both unset keeps it on the unix socket.
       grpc_listen_addr = lib.mkIf grpcFromHost "0.0.0.0:${toString grpcPort}";
       grpc_allow_insecure = lib.mkIf grpcFromHost true;
       dns = {
-        # The module's default already, pinned since caddy-internal's apps
-        # are only served at MagicDNS names (see magicDnsAliases below).
         magic_dns = true;
         base_domain = baseDomain;
         extra_records_path = lib.mkIf hasAliases extraRecordsFile;
-        # MagicDNS clients use this as their sole resolver, so it must be
-        # able to resolve the public internet too, not just the tailnet.
+        # MagicDNS clients use this as their sole resolver.
         nameservers.global = publicResolvers;
       };
     };
   };
 
-  # Headplane: headscale's web UI, run next to it because nixpkgs' module
-  # insists on it (it runs as headscale's user, reads its config file, and
-  # talks to it on loopback). Login is by headscale API key. There is no
-  # OIDC or proxy auth here: this repo has no identity provider, and
-  # caddy-internal doesn't know who is on the other end of the tailnet.
   services.headplane = lib.mkIf hasHeadplane {
     enable = true;
     settings = {
       server = {
-        # Every interface, with the allowedTCPPortsFrom rule above as what
-        # actually scopes it, the same trade Grafana makes in its guest.
         host = "0.0.0.0";
         inherit (headplane) port;
         base_url = headplane.baseUrl;
-        # Imported below from the credential the host generates.
         cookie_secret_path = "/run/credentials/headplane.service/headplane-cookie-secret";
       };
-      # headscale.url defaults to loopback on services.headscale.port, and
-      # config_path to its (read-only, Nix-store) config file. Headplane
-      # shows those settings but can't change them, which is what we want:
-      # this repo is the only place headscale's config is written.
-      #
-      # dns_records_path stays unset. headscale-magicdns-aliases below owns
-      # the extra-records file and rewrites it every minute, so anything
-      # Headplane wrote there would be overwritten.
+      # dns_records_path stays unset: headscale-magicdns-aliases owns that file.
     };
   };
   systemd.services.headplane.serviceConfig.ImportCredential = lib.mkIf hasHeadplane [
     "headplane-cookie-secret"
   ];
 
-  # magicDnsAliases: publish each alias fqdn as A/AAAA records pointing at
-  # the named node's current tailnet addresses. headscale refuses to start
-  # if extra_records_path doesn't exist yet, so seed it empty first; after
-  # that, headscale-magicdns-aliases rewrites it (only when it changes)
-  # whenever it runs, and headscale picks the change up by itself.
+  # headscale refuses to start if extra_records_path doesn't exist yet.
   systemd.services.headscale.serviceConfig.ExecStartPre = lib.mkIf hasAliases [
     "${pkgs.writeShellScript "headscale-seed-extra-records" ''
       [ -e ${extraRecordsFile} ] || echo '[]' > ${extraRecordsFile}
@@ -226,11 +130,8 @@ in
     ];
     serviceConfig = {
       Type = "oneshot";
-      # Same user as headscale: owns extraRecordsFile, and is in the group
-      # allowed on the CLI's unix socket.
       User = config.services.headscale.user;
       Group = config.services.headscale.group;
-      # Right after boot headscale's CLI socket may not be up yet.
       Restart = "on-failure";
       RestartSec = "10s";
     };
@@ -240,7 +141,6 @@ in
       new=$(mktemp)
       trap 'rm -f "$new"' EXIT
 
-      # A node that isn't registered (yet) simply contributes no records.
       headscale nodes list -o json \
         | jq --argjson aliases ${lib.escapeShellArg (builtins.toJSON magicDnsAliases)} '
             (. // []) as $nodes
@@ -250,16 +150,12 @@ in
                 | { name: $a.key, type: (if contains(":") then "AAAA" else "A" end), value: . } ]
           ' > "$new"
 
-      # Rewritten in place (not renamed over) and only on change: headscale
-      # watches this exact file.
+      # Rewritten in place, and only on change: headscale watches this exact file.
       if ! cmp -s "$new" ${extraRecordsFile}; then
         cat "$new" > ${extraRecordsFile}
       fi
     '';
   };
-  # Addresses only change when a node re-registers; polling keeps that
-  # (and a node joining after headscale started) covered without a hook
-  # into headscale itself.
   systemd.timers.headscale-magicdns-aliases = lib.mkIf hasAliases {
     wantedBy = [ "timers.target" ];
     timerConfig = {

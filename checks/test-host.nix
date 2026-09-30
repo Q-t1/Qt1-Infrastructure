@@ -1,5 +1,3 @@
-# Minimal NixOS host used only to evaluate/build the infra layer on its own,
-# with no consumer flake involved. Nothing here is deployed.
 { ... }:
 {
   qt1.infra.microvmHost = {
@@ -24,11 +22,8 @@
     enable = true;
     hostname = "status.example.com";
   };
-  # loginServerUrl/authKeyFile/loginServerAddress default to the
-  # headscale/caddy guests' own values.
   qt1.infra.tailscaleClient.enable = true;
 
-  # Enough of a machine for `system.build.toplevel` to evaluate.
   boot.loader.grub.devices = [ "/dev/vda" ];
   fileSystems."/" = {
     device = "/dev/vda1";
@@ -36,7 +31,6 @@
   };
   networking = {
     hostName = "infra-test";
-    # the host owns its uplink; networkd here only manages the guest bridge
     useDHCP = false;
   };
   system.stateVersion = "26.05";

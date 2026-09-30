@@ -1,44 +1,8 @@
-# caddy: the WAN-facing reverse proxy in front of headscale. Takes over the
-# job headscale's own built-in Let's Encrypt did before, but as a real HTTP
-# reverse proxy it can also do what a single TLS listener inside headscale
-# itself couldn't: keep /api/v1/* (headscale's REST API) off the public
-# internet entirely, not just bearer-token gated. See
-# ../modules/guests/caddy.nix and headscale's own guest config
-# (../guests/headscale.nix).
-#
-# It also serves whatever other public sites the guests register in
-# qt1.infra.guests.caddy.virtualHosts (the gatus status page), each with its
-# own certificate — see the `virtualHosts` argument below.
-#
-# Its Prometheus metrics (request rates, latency histograms, in-flight
-# requests) are served on a port of their own, for the monitoring guest
-# alone, and only when it asks for them — see the `metrics` argument below
-# and qt1.infra.guests.caddy.metricsFromMonitoring.
-#
-# Stateful, unlike a "just forwards packets" guest: caddy's certificate and
-# ACME account data live on a persistent volume (/var/lib/caddy), so a
-# guest restart doesn't mean re-issuing a certificate (and burning into
-# Let's Encrypt's rate limit) every time.
-#
-# No SSH — caddy needs no local CLI/admin access the way headscale does,
-# it's entirely declared here. Its own service logs are mirrored to the
-# guest's serial console instead, the same reasoning as pangolin's old
-# guest: `journalctl -u microvm@caddy` on the host is the only way to see
-# them, since there's no other route in.
-#
-# Built on ./base.nix; called with the hostname/upstream it fronts by the
-# host-side module, since guests are evaluated by microvm.nix in a nested
-# nixosSystem that gets none of the host's specialArgs.
 {
   hostname,
   upstream,
   letsEncryptEmail,
-  # `hostname = "upstream-host:port"`, as qt1.infra.guests.caddy.virtualHosts:
-  # public sites besides headscale's.
   virtualHosts ? { },
-  # `{ port = <n>; from = "<address>"; }` when the monitoring guest scrapes
-  # this one (qt1.infra.guests.caddy.metricsFromMonitoring), `{ }` otherwise:
-  # it gates the whole metrics listener below, collection included.
   metrics ? { },
 }:
 
@@ -58,7 +22,7 @@
   };
 
   networking.firewall.allowedTCPPorts = [
-    80 # ACME HTTP-01 challenge, and caddy's own http->https redirect
+    80
     443
   ];
 
@@ -72,27 +36,13 @@
     email = letsEncryptEmail;
     virtualHosts = {
       ${hostname} = {
-        # The access log, and the one thing that gives qt1.infra.crowdsec
-        # (../modules/crowdsec.nix) something to read: to this guest's stdout,
-        # captured like everything else here (see
-        # systemd.services.caddy.serviceConfig above) — mirrored to the guest's
-        # console and from there to the host's journal.
-        #
-        # It has to be this option — the vhost's own logger — and not a `log`
-        # directive in extraConfig below. A bare `log` points the access log at
-        # caddy's *default* logger, which services.caddy pins at level ERROR,
-        # and access entries are INFO: caddy then silently logs nothing, while
-        # the module's own per-vhost default keeps writing them to a file under
-        # /var/log/caddy inside this guest's tmpfs root, where nothing can read
-        # them and they grow in RAM. Verified against the adapted config: the
-        # vhost had two loggers, the file one and the muted default.
+        # Must be the vhost's own logger. A bare `log` directive uses caddy's
+        # default logger, which services.caddy pins at ERROR, so INFO access
+        # entries are silently dropped. stdout reaches the host journal, which
+        # is what CrowdSec reads.
         logFormat = "output stdout";
         extraConfig = ''
-          # headscale's REST API (/api/v1/*) is bearer-token gated on its own,
-          # but that's not the same as being off the public internet — this is
-          # what actually keeps it off: never proxied, full stop. Use SSH + the
-          # local `headscale` CLI (see the README) for anything that would
-          # otherwise need this from outside the bridge.
+          # Keeps headscale's REST API off the WAN; use the CLI over SSH instead.
           @blocked path /api/*
           respond @blocked 404
 
@@ -100,8 +50,6 @@
         '';
       };
     }
-    # Every other public site: a plain reverse proxy, logged the same way as
-    # headscale's above so CrowdSec reads its access log too.
     // lib.mapAttrs (_: siteUpstream: {
       logFormat = "output stdout";
       extraConfig = ''
@@ -109,27 +57,11 @@
       '';
     }) virtualHosts;
 
-    # Prometheus metrics, when the monitoring guest collects them. Two halves:
-    #
-    #  - the global `metrics` option, which is what actually turns HTTP metrics
-    #    collection on (without it caddy 2.11 leaves them unregistered and the
-    #    endpoint below serves only Go/process metrics). `per_host` adds the
-    #    vhost as a label; caddy only labels hosts it has an explicit matcher
-    #    for and buckets everything else under `_other`, so an arbitrary Host
-    #    header off the WAN can't blow up the label cardinality.
-    #
-    #  - a site of its own for the endpoint, on a port of its own. Caddy
-    #    already serves /metrics on its admin API, but that API can also
-    #    rewrite caddy's whole configuration, so it stays on the guest's
-    #    loopback where upstream put it: this site exposes the metrics and
-    #    nothing else. Plain http:// with an explicit port, so automatic HTTPS
-    #    leaves it alone (no certificate for a bridge address, and nothing to
-    #    redirect).
-    #
-    #    The address in the site line becomes a Host matcher, not a bind
-    #    address — caddy still listens on :<port> on every interface — so what
-    #    actually keeps this endpoint to one caller is the firewall rule
-    #    below.
+    # The global `metrics` option is what enables HTTP metrics at all.
+    # `per_host` only labels hosts with an explicit matcher, so WAN Host
+    # headers can't blow up cardinality. The endpoint gets its own site rather
+    # than the admin API, which can rewrite caddy's config. The site address
+    # is a Host matcher, not a bind address: the firewall rule scopes it.
     globalConfig = lib.mkIf (metrics != { }) ''
       metrics {
         per_host
@@ -142,9 +74,6 @@
     '';
   };
 
-  # What scopes the metrics listener above: the monitoring guest's address
-  # only, not the rest of the bridge, and never the WAN — this port has no
-  # forwardPorts entry on the host.
   qt1.guest.allowedTCPPortsFrom = lib.optional (metrics != { }) {
     inherit (metrics) port from;
   };
