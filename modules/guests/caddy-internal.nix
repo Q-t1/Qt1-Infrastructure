@@ -7,6 +7,7 @@ let
   infraLib = import ../../lib.nix { inherit lib; };
   headscale = config.qt1.infra.guests.headscale;
   monitoring = config.qt1.infra.guests.monitoring;
+  gatus = config.qt1.infra.guests.gatus;
   cfg = config.qt1.infra.guests.caddyInternal;
 
   # VM name, and so its tailnet node name (qt1.guest.tailnet in
@@ -86,6 +87,19 @@ in
         '';
       };
 
+      probesFromGatus = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Open this proxy's HTTPS port on the guest bridge to the gatus
+          guest's address, so the status page can check every vhost the way
+          a tailnet client reaches it. Only that one address: the rest of the
+          bridge and the WAN still can't reach it.
+
+          Turned on by qt1.infra.guests.gatus.
+        '';
+      };
+
       metricsFromMonitoring = lib.mkOption {
         type = lib.types.bool;
         default = false;
@@ -130,6 +144,7 @@ in
             port = cfg.metricsPort;
             from = monitoring.address;
           };
+          probeFrom = if cfg.probesFromGatus then gatus.address else null;
         };
         tailnet = true;
       })

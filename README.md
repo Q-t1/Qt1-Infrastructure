@@ -26,6 +26,8 @@ modules/crowdsec.nix             host-side CrowdSec + bouncer (qt1.infra.crowdse
 modules/guests/monitoring.nix    host-side VM + collection    (qt1.infra.guests.monitoring)
 guests/monitoring.nix            the guest's own NixOS config
 guests/dashboards/               Grafana dashboards, provisioned per topic
+modules/guests/gatus.nix         host-side VM + endpoints     (qt1.infra.guests.gatus)
+guests/gatus.nix                 the guest's own NixOS config
 checks/test-host.nix             minimal host, used only to build this layer alone
 ```
 
@@ -74,6 +76,10 @@ qt1.infra = {
   crowdsec.enable = true;   # optional: bans offenders against caddy's logs
   guests.caddyInternal.enable = true;   # optional: tailnet-only proxy for internal apps
   guests.monitoring.enable = true;   # optional: Loki+Prometheus+Grafana, behind caddyInternal
+  guests.gatus = {                   # optional: public status page, behind caddy
+    enable = true;
+    hostname = "status.example.com";
+  };
 };
 ```
 
@@ -108,8 +114,15 @@ the WAN (`networking.nat.forwardPorts`, wired by `modules/guests/caddy.nix`):
 Your router/firewall must forward these from your WAN address to this host —
 that's outside this repo's scope. You also need DNS: an A/AAAA record for
 `qt1.infra.guests.headscale.serverUrl`'s hostname, pointed at your WAN
-address (this is the *only* DNS record needed — not a wildcard; nothing here
-uses subdomains-per-resource the way the old Pangolin stack did).
+address. That is the only DNS record needed, plus one per public site in
+`qt1.infra.guests.caddy.virtualHosts` — so far just the gatus status page's
+`hostname` (see "gatus guest" below). No wildcard.
+
+`virtualHosts` is how any other guest gets a public site (`hostname =
+"upstream-host:port"`): caddy fetches its own certificate for each and logs
+its requests the same way, so CrowdSec covers them too. It's the internet-facing
+counterpart of `qt1.infra.guests.caddyInternal.virtualHosts` — anything meant
+for the tailnet only belongs there instead.
 
 **`/api/v1/*` (headscale's REST API) is not proxied through at all** — this
 is the whole reason caddy sits in front rather than leaving headscale to
@@ -598,6 +611,57 @@ caveat as the headscale/caddy guests: `/var/lib/loki`, `/var/lib/prometheus2`
 and `/var/lib/grafana` are plain root-fs volume images, not backed by
 anything else. Back them up before reinstalling if the history matters to
 you, or accept starting fresh.
+
+## gatus guest (`qt1.infra.guests.gatus`)
+
+Optional, off by default. [Gatus](https://gatus.io) (`10.100.0.6`), from
+nixpkgs' own `services.gatus` module, checks the other guests' services every
+minute and serves the results as a **public** status page:
+
+```nix
+qt1.infra.guests.gatus = {
+  enable = true;
+  hostname = "status.example.com";   # needs a DNS record, like serverUrl's
+};
+```
+
+The WAN-facing caddy serves it at `https://<hostname>/`, with a Let's Encrypt
+certificate of its own. Its port (8080) is opened to caddy's bridge address
+only, and the guest has no port forward of its own.
+
+What it checks is derived from the rest of this repo, so there is nothing to
+list by hand:
+
+- **Public / Headscale**: `https://<serverUrl's hostname>/health` through the
+  public caddy, i.e. the same proxy and certificate every Tailscale client
+  uses. It must answer 200 with `"status": "pass"`, and the certificate must
+  have more than a week left. The hostname is pinned to caddy's bridge
+  address inside the guest, the same NAT-hairpin shortcut as "Joining the
+  tailnet".
+- **Tailnet / one per caddy-internal vhost** (Grafana, Headplane, and anything
+  you add to `caddyInternal.virtualHosts`): each at its real
+  `https://<label>.<baseDomain>/...` URL, reached over the bridge by pinning
+  those names to caddy-internal's address. caddy-internal opens 443 to this
+  guest's address alone for it (`caddyInternal.probesFromGatus`, set for
+  you). Certificate verification is off for these, since caddy-internal's
+  local CA is generated at runtime and this guest has no copy of it. What's
+  checked is that the proxy and the app behind it answer (any status below
+  400, after redirects).
+
+Add more with `qt1.infra.guests.gatus.endpoints`, in
+[gatus's own format](https://gatus.io/docs).
+
+**The page is public, so it hides internals.** Every generated endpoint sets
+gatus's `ui.hide-hostname`, `hide-url`, `hide-port` and `hide-errors`: the
+page shows each check's name, its conditions and whether they held, never an
+internal address or hostname. Errors are still logged:
+`journalctl -u microvm@gatus` on the host. Set the same `ui` options on any
+internal endpoint you add yourself.
+
+Check history lives in SQLite on the guest's `/var/lib/gatus` volume, so it
+survives restarts (and, like every other volume here, not a reinstall of the
+host). No alerting is configured yet; see gatus's `alerting` settings for
+ntfy, Telegram, email and others.
 
 ## Adding a guest
 

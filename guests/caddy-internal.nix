@@ -59,6 +59,9 @@
   # this one (qt1.infra.guests.caddyInternal.metricsFromMonitoring), `{ }`
   # otherwise: it gates the whole metrics listener below, collection included.
   metrics ? { },
+  # The gatus guest's bridge address when it checks the vhosts below
+  # (qt1.infra.guests.caddyInternal.probesFromGatus), null otherwise.
+  probeFrom ? null,
 }:
 
 { config, lib, ... }:
@@ -97,13 +100,22 @@ in
     443
   ];
 
-  # The metrics endpoint below is the one thing here reachable over the guest
-  # bridge rather than the tailnet — from the monitoring guest's address only,
-  # nothing else on the bridge, and never from the WAN (this guest has no
-  # forwardPorts entry at all).
-  qt1.guest.allowedTCPPortsFrom = lib.optional (metrics != { }) {
-    inherit (metrics) port from;
-  };
+  # Two things here are reachable over the guest bridge rather than the
+  # tailnet, each from one guest's address only — nothing else on the bridge,
+  # and never from the WAN (this guest has no forwardPorts entry at all):
+  #
+  #  - the metrics endpoint below, for the monitoring guest;
+  #  - HTTPS, for the gatus guest, which checks every vhost here by name.
+  #    The vhosts only answer their own names, so this gives it nothing a
+  #    tailnet client doesn't have.
+  qt1.guest.allowedTCPPortsFrom =
+    lib.optional (metrics != { }) {
+      inherit (metrics) port from;
+    }
+    ++ lib.optional (probeFrom != null) {
+      port = 443;
+      from = probeFrom;
+    };
 
   # Mirror caddy's own output to this guest's serial console, exactly as
   # ./caddy.nix does and for the same reason: no SSH, a tmpfs root, so its

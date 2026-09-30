@@ -20,6 +20,10 @@
   qt1.infra.guests.caddyInternal.enable = true;
   qt1.infra.guests.headscale.headplane.enable = true;
   qt1.infra.guests.monitoring.enable = true;
+  qt1.infra.guests.gatus = {
+    enable = true;
+    hostname = "status.example.com";
+  };
   # loginServerUrl/authKeyFile/loginServerAddress default to the
   # headscale/caddy guests' own values.
   qt1.infra.tailscaleClient.enable = true;
