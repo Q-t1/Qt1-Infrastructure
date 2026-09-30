@@ -1,9 +1,3 @@
-# What every guest here has in common, imported for each of them by mkGuest
-# (../lib.nix): a qemu microVM on one tap interface, a static address on the
-# guest bridge via networkd, fw_cfg credentials, source-restricted firewall
-# openings, and — for guests that need it — a persistent tailnet identity.
-# The guest-specific modules (./<name>.nix) only add what makes them
-# different, reading their network coordinates from `config.qt1.guest`.
 { config, lib, ... }:
 
 let
@@ -95,8 +89,7 @@ in
         ];
       };
 
-      # Credentials arrive over qemu's fw_cfg; its sysfs interface is a
-      # module, so load it early enough for systemd to import them at boot.
+      # Credentials arrive over fw_cfg; load it early enough for systemd to import them.
       boot.initrd.kernelModules = [ "qemu_fw_cfg" ];
 
       networking = {
@@ -122,8 +115,6 @@ in
     (lib.mkIf cfg.tailnet.enable {
       microvm.volumes = [
         {
-          # tailscaled's node key: keeps the node — and every MagicDNS name
-          # pointing at it — across restarts of the tmpfs root.
           image = "tailscale-state.img";
           mountPoint = "/var/lib/tailscale";
           size = 64;
@@ -133,12 +124,9 @@ in
       qt1.infra.tailscaleClient = {
         enable = true;
         inherit (cfg.tailnet) loginServerUrl loginServerAddress;
-        # Handed in by mkGuest as microvm.credentialFiles.tailscale-authkey.
         authKeyFile = "/run/credentials/tailscale-autoconnect.service/tailscale-authkey";
         hostname = cfg.name;
-        # Not ephemeral: an ephemeral node would be deleted by headscale
-        # whenever the VM stays down past its inactivity timeout, taking
-        # its name and addresses with it.
+        # headscale deletes inactive ephemeral nodes, taking their name and addresses.
         ephemeral = false;
       };
       systemd.services.tailscale-autoconnect.serviceConfig.ImportCredential = [ "tailscale-authkey" ];

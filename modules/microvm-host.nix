@@ -1,9 +1,3 @@
-# Host side of the microVM layer: the guest bridge and the NAT that gets the
-# guests off the box. Guests themselves live in ./guests/, one module each.
-#
-# The uplink interface is deliberately an option rather than a constant: which
-# NIC the machine has is an OS fact owned by the host's own configuration, not
-# something this repo should know.
 { config, lib, ... }:
 
 let
@@ -58,8 +52,6 @@ in
   config = lib.mkIf cfg.enable {
     microvm.host.enable = true;
 
-    # Only the bridge and the guests' tap devices are handed to networkd; the
-    # host's uplink stays with whatever manages it in the host configuration.
     systemd.network = {
       enable = true;
       # networkd manages no uplink here, so waiting on it would only stall boot.
@@ -72,10 +64,8 @@ in
       networks."10-${cfg.bridge}" = {
         matchConfig.Name = cfg.bridge;
         address = [ "${cfg.hostAddress}/${toString cfg.prefixLength}" ];
-        # Keep the address while no guest is attached.
         networkConfig.ConfigureWithoutCarrier = true;
       };
-      # Tap devices are created by microvm-tap-interfaces@<vm> as `vm-*`.
       networks."11-${cfg.bridge}-taps" = {
         matchConfig.Name = "vm-*";
         networkConfig.Bridge = cfg.bridge;

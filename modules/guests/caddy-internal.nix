@@ -1,6 +1,3 @@
-# Host side of the caddy-internal guest: the VM entry, the vhosts it serves,
-# and the MagicDNS alias records headscale publishes for them. See
-# ../../guests/caddy-internal.nix for the guest's own configuration.
 { config, lib, ... }:
 
 let
@@ -10,8 +7,6 @@ let
   gatus = config.qt1.infra.guests.gatus;
   cfg = config.qt1.infra.guests.caddyInternal;
 
-  # VM name, and so its tailnet node name (qt1.guest.tailnet in
-  # guests/base.nix): what every alias record points at.
   name = "caddy-internal";
 in
 {
@@ -137,9 +132,6 @@ in
         module = import ../../guests/caddy-internal.nix {
           inherit (cfg) virtualHosts;
           inherit (headscale) baseDomain;
-          # A plain conditional, not lib.mkIf: this is a function argument to
-          # the guest module, not an option definition — an mkIf here would
-          # arrive as an attrset the guest cannot read.
           metrics = lib.optionalAttrs cfg.metricsFromMonitoring {
             port = cfg.metricsPort;
             from = monitoring.address;

@@ -1,10 +1,3 @@
-# A machine joining the tailnet coordinated by this repo's own headscale
-# guest. Generic on purpose: the same module applies whether it's mixed into
-# the bare host's configuration or into a guest's — only `authKeyFile` differs
-# (a plain host path for the host, a systemd-credential path imported from the
-# host for a guest; see qt1.guest.tailnet in ../guests/base.nix for that
-# wiring). On the host, loginServerUrl/authKeyFile/loginServerAddress default
-# to the headscale/caddy guests' own values when those are enabled.
 { config, lib, ... }:
 
 let
@@ -93,10 +86,6 @@ in
       ];
     };
 
-    # tailscaled's own persisted state makes `tailscale up` idempotent: on a
-    # machine with a real disk this is a no-op after the first real run, and
-    # on a tmpfs-root guest it re-registers fresh every boot (hence
-    # `ephemeral` above, so those re-registrations don't pile up).
     systemd.services.tailscale-autoconnect = {
       description = "Join the tailnet via headscale";
       after = [
