@@ -198,8 +198,9 @@ in
     # - Upstream names localConfig links by store hash and never removes old ones,
     #   leaving duplicate parsers after every change.
     # Done here, not via tmpfiles, which a switch doesn't guarantee runs first.
-    # mkBefore so a failure in upstream's own ExecStartPre can't skip it.
-    systemd.services.crowdsec.serviceConfig.ExecStartPre = lib.mkBefore [
+    # mkAfter, not mkBefore: upstream's list opens with " " (an empty
+    # ExecStartPre=), which makes systemd drop every command listed before it.
+    systemd.services.crowdsec.serviceConfig.ExecStartPre = lib.mkAfter [
       "${lib.getExe' pkgs.coreutils "ln"} -sf ${crowdsecConfigFile} /etc/crowdsec/config.yaml"
       "${syncLocalConfigLinks}"
     ];
